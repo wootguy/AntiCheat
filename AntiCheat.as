@@ -73,8 +73,7 @@ class SpeedState {
 	float lastDetectTime;
 	Vector lastOrigin;
 	float nextAllowedAttack;
-	
-	array<float> lastCmdCalls;
+
 	array<float> lastSpeeds;
 	array<float> lastExpectedSpeeds;
 	
@@ -103,26 +102,25 @@ void detect_speedhack() {
 		
 		bool isIdleTooFast = detect_weapon_idle_speedhack(state, plr, timeSinceLastCheck);
 		bool isTooFast = detect_movement_speedhack(state, plr, timeSinceLastCheck);
-		bool isTooManyCmds = state.lastCmdCalls.size() > MAX_CMDS_PER_SECOND;
 		bool isWepTooFast = state.wepDetections > 0;
 		
 		if (isWepTooFast) {
 			state.detections += state.wepDetections;
 		}
 		
-		if (isTooFast || isTooManyCmds || isWepTooFast || isIdleTooFast) {
+		if (isTooFast || isWepTooFast || isIdleTooFast) {
 			state.detections += 1;
 		} else if (state.detections > 0) {
 			state.detections -= 1;
 		}
 		
-		//println("SPEEDHACK: " + state.detections + " (" + isTooFast + " " + isTooManyCmds + " " + isIdleTooFast + " " + state.wepDetections + ")");
+		//println("SPEEDHACK: " + state.detections + " (" + isTooFast + " " + isIdleTooFast + " " + state.wepDetections + ")");
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
 			plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
 			float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
 			plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
-			g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[VAC] " + plr.pev.netname + " was killed for speedhacking.\n");
+			g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[AntiCheat] " + plr.pev.netname + " was killed for speedhacking.\n");
 			state.detections = 0;
 		}
 		
@@ -211,25 +209,9 @@ float lastAttack = 0;
 
 // called after weapon shoot code
 HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
-	SpeedState@ state = g_speedStates[plr.entindex()];
-
-	// More PlayerUse calls are made when speedhacking. Client FPS also affects PlayerUse count though.
-	// The max client FPS is 200, so any more calls than that must mean the client is speedhacking.
-	// This detects extreme speedhacks at 20 FPS (>11x) or mild speedhacks (1.1x) at 200 FPS
-	
-	state.lastCmdCalls.insertLast(g_EngineFuncs.Time());
-	float cutoff = g_EngineFuncs.Time() - 1.0f;
-	while (state.lastCmdCalls.size() > 0) {
-		if (state.lastCmdCalls[0] < cutoff) {
-			state.lastCmdCalls.removeAt(0);
-		} else {
-			break;
-		}
-	}
-	
+	SpeedState@ state = g_speedStates[plr.entindex()];	
 	
 	// Detect if weapons are being shot too quickly
-	
 	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
 	
 	if (wep !is null) {
