@@ -16,6 +16,13 @@ int g_playerPostThinkPrimaryClip = 0;
 int g_playerPostThinkPrimaryAmmo = 0;
 int g_playerPostThinkSecondaryAmmo = 0;
 
+array<Vector> g_testDirs = {
+	Vector(32, 0, 0),
+	Vector(-32, 0, 0),
+	Vector(0, 32, 0),
+	Vector(0, -32, 0)
+};
+
 void print(string text) { g_Game.AlertMessage( at_console, text); }
 void println(string text) { print(text + "\n"); }
 
@@ -189,7 +196,24 @@ bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSi
 	
 	//println("SPEED: " + int(avgActual) + " / " + int(avgExpected));
 	
-	return avgActual > MOVEMENT_HACK_MIN && avgActual > avgExpected*MOVEMENT_HACK_RATIO;
+	bool isSpeedWrong = avgActual > MOVEMENT_HACK_MIN && avgActual > avgExpected*MOVEMENT_HACK_RATIO;
+	
+	if (!isSpeedWrong) {
+		return false;
+	}
+	
+	// being pushed by entities doesn't update velocity, so allow faster movement around moving ents
+	Vector start = plr.pev.origin;
+	for (uint i = 0; i < g_testDirs.size(); i++) {
+		TraceResult tr;		
+		g_Utility.TraceHull( start, start + g_testDirs[i], ignore_monsters, human_hull, plr.edict(), tr );
+		CBaseEntity@ pHit = g_EntityFuncs.Instance( tr.pHit );
+		if (pHit !is null and (pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1)) {
+			return false;
+		}
+	}
+	
+	return true;
 }
 
 // called before weapon shoot code
