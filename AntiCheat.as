@@ -107,17 +107,16 @@ void detect_speedhack() {
 		float timeSinceLastCheck = g_Engine.time - state.lastDetectTime;
 		state.lastDetectTime = g_Engine.time;
 		
-		bool isIdleTooFast = detect_weapon_idle_speedhack(state, plr, timeSinceLastCheck);
 		bool isTooFast = detect_movement_speedhack(state, plr, timeSinceLastCheck);
 		bool isWepTooFast = state.wepDetections > 0;
 		
 		if (isWepTooFast) {
 			state.detections += state.wepDetections;
 		}
-		
-		if (isTooFast || isWepTooFast || isIdleTooFast) {
+		else if (isTooFast) {
 			state.detections += 1;
-		} else if (state.detections > 0) {
+		}
+		else if (state.detections > 0) {
 			state.detections -= 1;
 		}
 		
@@ -133,23 +132,6 @@ void detect_speedhack() {
 		
 		state.wepDetections = 0;
 	}
-}
-
-// weapon idle timers decrease faster when speed hacking.
-// this only works above 1.5x speed and when certain weapons are equipped.
-bool detect_weapon_idle_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSinceLastCheck) {
-	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-
-	if (wep !is null && g_speedhackPrimaryTime.exists(wep.pev.classname)) {
-		float idleDiff = state.lastIdleTime - wep.m_flTimeWeaponIdle;
-		float error = int((idleDiff - timeSinceLastCheck)*1000);
-		state.lastIdleTime = wep.m_flTimeWeaponIdle;
-		
-		// too low and fps_max 30 will start triggering without speedhack
-		return error > 15;
-	}
-	
-	return false;
 }
 
 bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSinceLastCheck) {
