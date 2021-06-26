@@ -120,7 +120,7 @@ void detect_speedhack() {
 			state.detections -= 1;
 		}
 		
-		//println("SPEEDHACK: " + state.detections + " (" + isTooFast + " " + isIdleTooFast + " " + state.wepDetections + ")");
+		//println("SPEEDHACK: " + state.detections + " (" + isTooFast + " " + state.wepDetections + ")");
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
 			plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
@@ -128,6 +128,16 @@ void detect_speedhack() {
 			plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
 			g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[AntiCheat] " + plr.pev.netname + " was killed for speedhacking.\n");
 			state.detections = 0;
+			
+			// log to file for debugging false positives
+			string wepName = "(no wep)";
+			CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
+			if (wep !is null) {
+				wepName = wep.pev.classname;
+			}
+			
+			string debugStr = "[AntiCheat] Killed " + plr.pev.netname + " at " + plr.pev.origin.ToString() + " for " + isTooFast + " " + state.wepDetections + " " + wepName + "\n";
+			g_Log.PrintF(debugStr);
 		}
 		
 		state.wepDetections = 0;
