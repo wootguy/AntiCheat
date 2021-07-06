@@ -1,8 +1,9 @@
 
 const float MOVEMENT_HACK_RATIO = 1.1f; // how much actual and expected movement speed can differ
 const float MOVEMENT_HACK_MIN = 96; // min movement speed before detecting speedhack (detection inaccurate at low values)
-const int HACK_DETECTION_MAX = 30; // max number of detections before killing player (expect some false positives)
+const int HACK_DETECTION_MAX = 40; // max number of detections before killing player (expect some false positives)
 const int MAX_CMDS_PER_SECOND = 220; // max number of commands/sec before it's speedhacking (200 max FPS + some buffer)
+const float WEAPON_COOLDOWN_EPSILON = 0.05f; // allow this much error in cooldown time
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
@@ -158,7 +159,7 @@ bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSi
 	if (plr.pev.FlagBitSet(FL_ONGROUND) && plr.pev.groundentity !is null) {
 		CBaseEntity@ pTrain = g_EntityFuncs.Instance( plr.pev.groundentity );
 		
-		if (pTrain.pev.avelocity.Length() >= 1) {
+		if (pTrain is null or pTrain.pev.avelocity.Length() >= 1) {
 			return false; // too complicated to calculate where the player is expected to be
 		}
 		
@@ -250,14 +251,16 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 		}
 		
 		if (cooldown > 0) {
-			if (g_Engine.time + 0.01f < state.nextAllowedAttack) {
-				int penalty = Math.min(20, int(cooldown*20));
-				state.wepDetections += penalty;
-				
+			if (g_Engine.time + WEAPON_COOLDOWN_EPSILON < state.nextAllowedAttack) {
+				int penalty = Math.min(10, int(cooldown*20));
 				if (wep.pev.classname == "weapon_m16" && cooldown < 1) {
 					penalty = 5;
 				}
+				
+				state.wepDetections += penalty;
+				
 				//println("SPEEDHACK " + penalty);
+				//g_Log.PrintF("[AntiCheat] Speedhack on " + plr.pev.netname + " " + wep.pev.classname + " " + lessPrimaryAmmo + " " + lessPrimaryClip + " " + wasReload + " " + lessSecondaryAmmo +  " " + g_Engine.time + "\n");
 			}
 			
 			float diff = g_Engine.time - lastAttack;
