@@ -1,9 +1,11 @@
 
-const float MOVEMENT_HACK_RATIO = 1.1f; // how much actual and expected movement speed can differ
+const float MOVEMENT_HACK_RATIO_FAST = 1.1f; // how much actual and expected movement speed can differ
+const float MOVEMENT_HACK_RATIO_SLOW = 0.9f; // how much actual and expected movement speed can differ
 const float MOVEMENT_HACK_MIN = 96; // min movement speed before detecting speedhack (detection inaccurate at low values)
 const int HACK_DETECTION_MAX = 40; // max number of detections before killing player (expect some false positives)
 const int MAX_CMDS_PER_SECOND = 220; // max number of commands/sec before it's speedhacking (200 max FPS + some buffer)
 const float WEAPON_COOLDOWN_EPSILON = 0.05f; // allow this much error in cooldown time
+const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min amount for damage)
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
@@ -35,11 +37,12 @@ void PluginInit() {
 	g_Hooks.RegisterHook( Hooks::Player::PlayerUse, @PlayerUse );
 	
 	g_Scheduler.SetInterval("detect_speedhack", 0.05f, -1);
+	g_Scheduler.SetInterval("detect_jumpbug", 0.0f, -1);
 	
 	MapStart();
 	
 	@g_enable = CCVar("enable", 1, "Toggle anticheat", ConCommandFlag::AdminOnly);
-	@g_killPenalty = CCVar("kill_penalty", 30, "respawn delay for killed speedhackers", ConCommandFlag::AdminOnly);
+	@g_killPenalty = CCVar("kill_penalty", 6, "respawn delay for killed speedhackers", ConCommandFlag::AdminOnly);
 }
 
 void MapStart() {
@@ -80,6 +83,7 @@ class SpeedState {
 	int wepDetections; // number of weapon speedhack detections (added to detections later)
 	float lastDetectTime;
 	Vector lastOrigin;
+	Vector lastVelocity;
 	float nextAllowedAttack;
 
 	array<float> lastSpeeds;
@@ -124,24 +128,58 @@ void detect_speedhack() {
 		//println("SPEEDHACK: " + state.detections + " (" + isTooFast + " " + state.wepDetections + ")");
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
-			plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
-			float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
-			plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
-			g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[AntiCheat] " + plr.pev.netname + " was killed for speedhacking.\n");
-			state.detections = 0;
-			
-			// log to file for debugging false positives
-			string wepName = "(no wep)";
-			CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-			if (wep !is null) {
-				wepName = wep.pev.classname;
+			{	// log to file for debugging false positives
+				string wepName = "(no wep)";
+				CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
+				if (wep !is null) {
+					wepName = wep.pev.classname;
+				}
+				
+				string debugStr = "[AntiCheat] Killed " + plr.pev.netname + " at " + plr.pev.origin.ToString() + " for ("
+							+ isTooFast + " " + plr.pev.velocity.ToString() + ") or (" + state.wepDetections + " " + wepName + ")" + g_Engine.time + "\n";
+				g_Log.PrintF(debugStr);
 			}
 			
-			string debugStr = "[AntiCheat] Killed " + plr.pev.netname + " at " + plr.pev.origin.ToString() + " for " + isTooFast + " " + state.wepDetections + " " + wepName + "\n";
-			g_Log.PrintF(debugStr);
+			state.detections = 0;
+			
+			kill_hacker(state, plr, "speedhacking");
 		}
 		
 		state.wepDetections = 0;
+	}
+}
+
+void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
+	plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
+	float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
+	plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
+	g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[AntiCheat] " + plr.pev.netname + " was killed for " + reason + ".\n");
+}
+
+void detect_jumpbug() {
+	if (g_enable.GetInt() == 0) {
+		return;
+	}
+	
+	for (int i = 1; i <= g_Engine.maxClients; i++) {
+		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
+		
+		if (plr is null or !plr.IsConnected() or !plr.IsAlive()) {
+			continue;
+		}
+		
+		SpeedState@ state = g_speedStates[plr.entindex()];
+		
+		if (state.lastVelocity.z < -JUMPBUG_SPEED and plr.pev.velocity.z > 0 and plr.m_afButtonPressed & (IN_JUMP | IN_DUCK) != 0) {
+			{	// log to file for debugging false positives
+				string debugStr = "[AntiCheat] Killed " + plr.pev.netname + " for jumpbug (" + state.lastVelocity.z + " " + plr.pev.velocity.z + " " + plr.m_afButtonPressed + ")\n";
+				g_Log.PrintF(debugStr);
+			}
+		
+			kill_hacker(state, plr, "using the jumpbug cheat");
+		}
+		
+		state.lastVelocity = plr.pev.velocity;
 	}
 }
 
@@ -189,7 +227,8 @@ bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSi
 	
 	//println("SPEED: " + int(avgActual) + " / " + int(avgExpected));
 	
-	bool isSpeedWrong = avgActual > MOVEMENT_HACK_MIN && avgActual > avgExpected*MOVEMENT_HACK_RATIO;
+	bool isSpeedWrong = avgActual > MOVEMENT_HACK_MIN
+			&& (avgActual > avgExpected*MOVEMENT_HACK_RATIO_FAST || avgActual < avgExpected*MOVEMENT_HACK_RATIO_SLOW);
 	
 	if (!isSpeedWrong) {
 		return false;
