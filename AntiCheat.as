@@ -1,23 +1,25 @@
 
 const float MOVEMENT_HACK_RATIO_FAST = 1.1f; // how much actual and expected movement speed can differ
-const float MOVEMENT_HACK_RATIO_SLOW = 0.9f; // how much actual and expected movement speed can differ
+const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much actual and expected movement speed can differ
 const float MOVEMENT_HACK_MIN = 96; // min movement speed before detecting speedhack (detection inaccurate at low values)
-const int HACK_DETECTION_MAX = 40; // max number of detections before killing player (expect some false positives)
+const int HACK_DETECTION_MAX = 30; // max number of detections before killing player (expect some false positives)
 const int MAX_CMDS_PER_SECOND = 220; // max number of commands/sec before it's speedhacking (200 max FPS + some buffer)
 const float WEAPON_COOLDOWN_EPSILON = 0.05f; // allow this much error in cooldown time
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min amount for damage)
+const float MAX_WEAPON_SPEEDUP = 1.3f; // max allowed speedhack on weapons (too low might kill innocent players)
+const float WEAPON_ANALYZE_TIME = 1.5f; // minimum continous shooting time to detect hacking
+const float MIN_BULLET_DELAY = 0.05f; // little faster than the fastest shooting weapon
+const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
+const int MOVEMENT_HISTORY_SIZE = 10; // bigger = better lag tolerance, but short speedhacks are undetected
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
 
 dictionary g_speedhackPrimaryTime; // weapon primary fires that are affected by speedhacking. Value is expected delay.
 dictionary g_speedhackSecondaryTime; // weapon secondary fires that are affected by speedhacking. Value is expected delay.
+dictionary g_speedhackMinBullets; // min bullets to analyze for being too fast (too low and laggy players get killed)
 
 array<SpeedState> g_speedStates(g_Engine.maxClients + 1);
-
-int g_playerPostThinkPrimaryClip = 0;
-int g_playerPostThinkPrimaryAmmo = 0;
-int g_playerPostThinkSecondaryAmmo = 0;
 
 array<Vector> g_testDirs = {
 	Vector(32, 0, 0),
@@ -33,7 +35,6 @@ void PluginInit() {
 	g_Module.ScriptInfo.SetAuthor( "w00tguy" );
 	g_Module.ScriptInfo.SetContactInfo( "https://github.com/wootguy" );
 	
-	g_Hooks.RegisterHook( Hooks::Player::PlayerPostThink, @PlayerPostThink );
 	g_Hooks.RegisterHook( Hooks::Player::PlayerUse, @PlayerUse );
 	
 	g_Scheduler.SetInterval("detect_speedhack", 0.05f, -1);
@@ -46,48 +47,63 @@ void PluginInit() {
 }
 
 void MapStart() {
-	CBaseEntity@ modernWeapon = g_EntityFuncs.CreateEntity("weapon_m16", null, true);
-	bool isClassicMap = modernWeapon is null;
-	g_EntityFuncs.Remove(modernWeapon);
+	CBasePlayerWeapon@ mp5 = cast<CBasePlayerWeapon@>(g_EntityFuncs.CreateEntity("weapon_9mmAR", null, true));
+	bool isClassicMap = mp5.iMaxClip() == 50;
+	g_EntityFuncs.Remove(mp5);
 
-	g_speedhackPrimaryTime["weapon_9mmhandgun"] = 0.2;
-	g_speedhackPrimaryTime["weapon_eagle"] = 0.3;
-	g_speedhackPrimaryTime["weapon_uzi"] = 0.08;
+	g_speedhackPrimaryTime["weapon_9mmhandgun"] = 0.21; // longer for primary
+	g_speedhackPrimaryTime["weapon_eagle"] = 0.305;
+	g_speedhackPrimaryTime["weapon_uzi"] = 0.076;
 	g_speedhackPrimaryTime["weapon_357"] = 0.75;
-	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.1;
-	g_speedhackPrimaryTime["weapon_shotgun"] = 0.95; // .75 when doing m2 after m1
+	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.104;
+	g_speedhackPrimaryTime["weapon_shotgun"] = 0.95;
 	g_speedhackPrimaryTime["weapon_crossbow"] = 1.55;
 	g_speedhackPrimaryTime["weapon_rpg"] = 2.0;
 	g_speedhackPrimaryTime["weapon_gauss"] = 0.2;
-	g_speedhackPrimaryTime["weapon_hornetgun"] = 0.1;
+	g_speedhackPrimaryTime["weapon_hornetgun"] = 0.104;
 	g_speedhackPrimaryTime["weapon_handgrenade"] = 1.0;
 	g_speedhackPrimaryTime["weapon_satchel"] = 0.5;
 	g_speedhackPrimaryTime["weapon_sniperrifle"] = 1.8;
-	g_speedhackPrimaryTime["weapon_m249"] = 0.08;
+	g_speedhackPrimaryTime["weapon_m249"] = 0.083;
 	g_speedhackPrimaryTime["weapon_sporelauncher"] = 0.6;
+	g_speedhackPrimaryTime["weapon_minigun"] = 0.06;
+	g_speedhackPrimaryTime["weapon_shockrifle"] = 0.08; // 0.22 for primary
+	g_speedhackPrimaryTime["weapon_medkit"] = 0.5; //
+	g_speedhackPrimaryTime["weapon_displacer"] = 2.0;
+	g_speedhackPrimaryTime["weapon_tripmine"] = 0.305;
+	g_speedhackPrimaryTime["weapon_snark"] = 0.305;
+	g_speedhackPrimaryTime["weapon_crowbar"] = 0.25;
+	g_speedhackPrimaryTime["weapon_pipewrench"] = 0.58;
+	g_speedhackPrimaryTime["weapon_grapple"] = 0.5;
+	g_speedhackPrimaryTime["weapon_m16"] = 0.168;
 	
 	g_speedhackSecondaryTime["weapon_9mmAR"] = 1.0; // false positive when doing m2 after m1
+	g_speedhackSecondaryTime["weapon_m16"] = 2.3;
 	
 	if (!isClassicMap) {
-		g_speedhackPrimaryTime["weapon_9mmhandgun"] = 0.16;
-		g_speedhackPrimaryTime["weapon_shotgun"] = 0.25;
-		g_speedhackPrimaryTime["weapon_m16"] = 0.07;
-		g_speedhackSecondaryTime["weapon_m16"] = 2.3;
-		g_speedhackPrimaryTime["weapon_9mmAR"] = 0.08;
+		g_speedhackPrimaryTime["weapon_9mmhandgun"] = 0.175;
+		g_speedhackPrimaryTime["weapon_shotgun"] = 0.255;
+		g_speedhackPrimaryTime["weapon_9mmAR"] = 0.09;
 	}
 }
 
 class SpeedState {
-	float lastIdleTime;
 	int detections; // number of times speedhack detections (many false positives with bad connection)
-	int wepDetections; // number of weapon speedhack detections (added to detections later)
 	float lastDetectTime;
 	Vector lastOrigin;
 	Vector lastVelocity;
-	float nextAllowedAttack;
+	float lastHealth;
+	int lastWepId = -1;
 
 	array<float> lastSpeeds;
 	array<float> lastExpectedSpeeds;
+	array<float> lastPrimaryShootTimes;
+	array<float> lastSecondaryShootTimes;
+	
+	float lastPrimaryClip;
+	float lastPrimaryAmmo;
+	float lastSecondaryAmmo;
+	float lastNextPrimaryAttack;
 	
 	SpeedState() {}
 }
@@ -112,20 +128,16 @@ void detect_speedhack() {
 		float timeSinceLastCheck = g_Engine.time - state.lastDetectTime;
 		state.lastDetectTime = g_Engine.time;
 		
-		bool isTooFast = detect_movement_speedhack(state, plr, timeSinceLastCheck);
-		bool isWepTooFast = state.wepDetections > 0;
+		int sussyMovement = detect_movement_speedhack(state, plr, timeSinceLastCheck);
 		
-		if (isWepTooFast) {
-			state.detections += state.wepDetections;
-		}
-		else if (isTooFast) {
-			state.detections += 1;
+		if (sussyMovement > 0) {
+			state.detections += sussyMovement;
 		}
 		else if (state.detections > 0) {
 			state.detections -= 1;
 		}
 		
-		//println("SPEEDHACK: " + state.detections + " (" + isTooFast + " " + state.wepDetections + ")");
+		//println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ")");
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
 			{	// log to file for debugging false positives
@@ -136,7 +148,7 @@ void detect_speedhack() {
 				}
 				
 				string debugStr = "[AntiCheat] Killed " + plr.pev.netname + " at " + plr.pev.origin.ToString() + " for ("
-							+ isTooFast + " " + plr.pev.velocity.ToString() + ") or (" + state.wepDetections + " " + wepName + ")" + g_Engine.time + "\n";
+							+ sussyMovement + " " + plr.pev.velocity.Length() + ") " + "\n";
 				g_Log.PrintF(debugStr);
 			}
 			
@@ -144,8 +156,6 @@ void detect_speedhack() {
 			
 			kill_hacker(state, plr, "speedhacking");
 		}
-		
-		state.wepDetections = 0;
 	}
 }
 
@@ -169,8 +179,11 @@ void detect_jumpbug() {
 		}
 		
 		SpeedState@ state = g_speedStates[plr.entindex()];
+		bool jumpedInstantlyAfterLanding = state.lastVelocity.z < -JUMPBUG_SPEED and plr.pev.velocity.z > 128;
+		bool perfectlyTimedJump = plr.m_afButtonPressed & (IN_JUMP | IN_DUCK) != 0;
+		bool preventedDamage = plr.pev.health == state.lastHealth;
 		
-		if (state.lastVelocity.z < -JUMPBUG_SPEED and plr.pev.velocity.z > 0 and plr.m_afButtonPressed & (IN_JUMP | IN_DUCK) != 0) {
+		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage) {
 			{	// log to file for debugging false positives
 				string debugStr = "[AntiCheat] Killed " + plr.pev.netname + " for jumpbug (" + state.lastVelocity.z + " " + plr.pev.velocity.z + " " + plr.m_afButtonPressed + ")\n";
 				g_Log.PrintF(debugStr);
@@ -180,12 +193,14 @@ void detect_jumpbug() {
 		}
 		
 		state.lastVelocity = plr.pev.velocity;
+		state.lastHealth = plr.pev.health;
 	}
 }
 
-bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSinceLastCheck) {
+// returns how extreme the speed difference in (1 = minor, 2+ major)
+int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSinceLastCheck) {
 	if (plr.pev.movetype == MOVETYPE_NOCLIP or plr.m_afPhysicsFlags & PFLAG_ONBARNACLE != 0) {
-		return false;
+		return 0;
 	}
 
 	Vector originDiff = plr.pev.origin - state.lastOrigin;
@@ -198,7 +213,7 @@ bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSi
 		CBaseEntity@ pTrain = g_EntityFuncs.Instance( plr.pev.groundentity );
 		
 		if (pTrain is null or pTrain.pev.avelocity.Length() >= 1) {
-			return false; // too complicated to calculate where the player is expected to be
+			return 0; // too complicated to calculate where the player is expected to be
 		}
 		
 		expectedVelocity = expectedVelocity + pTrain.pev.velocity;
@@ -211,7 +226,7 @@ bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSi
 	state.lastSpeeds.insertLast(actualSpeed);
 	state.lastExpectedSpeeds.insertLast(expectedSpeed);
 	
-	if (state.lastSpeeds.size() > 3) {
+	if (state.lastSpeeds.size() > MOVEMENT_HISTORY_SIZE) {
 		state.lastSpeeds.removeAt(0);
 		state.lastExpectedSpeeds.removeAt(0);
 	}
@@ -219,6 +234,12 @@ bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSi
 	float avgActual = 0;
 	float avgExpected = 0;
 	for (uint i = 0; i < state.lastSpeeds.size(); i++) {
+		if (state.lastSpeeds[i] > state.lastExpectedSpeeds[i]*50) {
+			// ignore super insane speed (teleport, most likely)
+			//println("IGNORE INSANE SPEED (teleport)");
+			continue;
+		}
+	
 		avgActual += state.lastSpeeds[i];
 		avgExpected += state.lastExpectedSpeeds[i];
 	}
@@ -227,11 +248,18 @@ bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSi
 	
 	//println("SPEED: " + int(avgActual) + " / " + int(avgExpected));
 	
+	if (avgExpected == 0) {
+		return 0;
+	}
+	
+	float errorRatio = avgActual / avgExpected;
 	bool isSpeedWrong = avgActual > MOVEMENT_HACK_MIN
 			&& (avgActual > avgExpected*MOVEMENT_HACK_RATIO_FAST || avgActual < avgExpected*MOVEMENT_HACK_RATIO_SLOW);
 	
+	//println("ERROR RATIO: " + errorRatio);
+	
 	if (!isSpeedWrong) {
-		return false;
+		return 0;
 	}
 	
 	// being pushed by entities doesn't update velocity, so allow faster movement around moving ents
@@ -241,27 +269,36 @@ bool detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSi
 		g_Utility.TraceHull( start, start + g_testDirs[i], ignore_monsters, human_hull, plr.edict(), tr );
 		CBaseEntity@ pHit = g_EntityFuncs.Instance( tr.pHit );
 		if (pHit !is null and (pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1)) {
-			return false;
+			return 0;
 		}
 	}
 	
-	return true;
-}
-
-// called before weapon shoot code
-HookReturnCode PlayerPostThink(CBasePlayer@ plr) {	
-	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
+	int sussyness = 1;
 	
-	if (wep !is null) {
-		g_playerPostThinkPrimaryClip = wep.m_iClip;
-		g_playerPostThinkPrimaryAmmo = wep.m_iPrimaryAmmoType != -1 ? plr.m_rgAmmo( wep.m_iPrimaryAmmoType ) : 0;
-		g_playerPostThinkSecondaryAmmo = wep.m_iSecondaryAmmoType != -1 ? plr.m_rgAmmo( wep.m_iSecondaryAmmoType ) : 0;
+	if (errorRatio > 2 || errorRatio < 0.25f) {
+		sussyness = 2;
+	} else if (errorRatio > 4 || errorRatio < 0.125f) {
+		sussyness = 3;
+	} else if (errorRatio > 8 || errorRatio < 0.05f) {
+		sussyness = 4;
 	}
 	
-	return HOOK_CONTINUE;
+	return sussyness;
 }
 
 float lastAttack = 0;
+
+int getPrimaryAmmo(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
+	return wep.m_iPrimaryAmmoType > -1 ? plr.m_rgAmmo(wep.m_iPrimaryAmmoType) : 0;
+}
+
+int getSecondaryAmmo(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
+	return wep.m_iSecondaryAmmoType > -1 ? plr.m_rgAmmo(wep.m_iSecondaryAmmoType) : 0;
+}
+
+bool isMelee(CBasePlayerWeapon@ wep) {
+	return wep.pev.classname == "weapon_crowbar" or wep.pev.classname == "weapon_pipewrench" or wep.pev.classname == "weapon_grapple";
+}
 
 // called after weapon shoot code
 HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
@@ -272,42 +309,67 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 	
 	if (wep !is null) {
 		// primary fired
-		bool lessPrimaryAmmo = g_playerPostThinkPrimaryAmmo > 0 && g_playerPostThinkPrimaryAmmo > plr.m_rgAmmo(wep.m_iPrimaryAmmoType);
-		bool lessSecondaryAmmo = g_playerPostThinkSecondaryAmmo > 0 && g_playerPostThinkSecondaryAmmo > plr.m_rgAmmo(wep.m_iSecondaryAmmoType);
-		bool lessPrimaryClip = g_playerPostThinkPrimaryClip > wep.m_iClip;
-		bool wasReload = wep.m_iClip > g_playerPostThinkPrimaryClip;
+		bool lessPrimaryAmmo = state.lastPrimaryAmmo > 0 && state.lastPrimaryAmmo > getPrimaryAmmo(plr, wep);
+		bool lessSecondaryAmmo = state.lastSecondaryAmmo > 0 && state.lastSecondaryAmmo > getSecondaryAmmo(plr, wep);
+		bool lessPrimaryClip = state.lastPrimaryClip > wep.m_iClip;
+		bool wasReload = wep.m_iClip > state.lastPrimaryClip;
+		bool meleeAttacked = wep.m_flNextPrimaryAttack != state.lastNextPrimaryAttack and isMelee(wep);
+		
+		state.lastPrimaryClip = wep.m_iClip;
+		state.lastPrimaryAmmo = getPrimaryAmmo(plr, wep);
+		state.lastSecondaryAmmo = getSecondaryAmmo(plr, wep);
+		state.lastNextPrimaryAttack = wep.m_flNextPrimaryAttack;
+		
+		if (wep.entindex() != state.lastWepId) {
+			state.lastWepId = wep.entindex();
+			state.lastPrimaryShootTimes.resize(0);
+			state.lastSecondaryShootTimes.resize(0);
+			return HOOK_CONTINUE;
+		}
+		
 		float cooldown = 0;
+		array<float>@ bulletTimes = null;
 		
-		if ((lessPrimaryAmmo || lessPrimaryClip) && !wasReload && g_speedhackPrimaryTime.exists(wep.pev.classname)) {
-			//println("SHOT PRIMARY " + wep.m_flNextPrimaryAttack);
+		// primary fired?
+		if ((lessPrimaryAmmo || lessPrimaryClip || meleeAttacked) && !wasReload && g_speedhackPrimaryTime.exists(wep.pev.classname)) {
 			g_speedhackPrimaryTime.get(wep.pev.classname, cooldown);
+			@bulletTimes = state.lastPrimaryShootTimes;
 		}
 		
-		// secondary fired
+		// secondary fired?
 		if (lessSecondaryAmmo && g_speedhackSecondaryTime.exists(wep.pev.classname)) {
-			//println("SHOT SECONDARY " + wep.m_flNextSecondaryAttack);
 			g_speedhackSecondaryTime.get(wep.pev.classname, cooldown);
+			@bulletTimes = state.lastSecondaryShootTimes;
 		}
 		
-		if (cooldown > 0) {
-			if (g_Engine.time + WEAPON_COOLDOWN_EPSILON < state.nextAllowedAttack) {
-				int penalty = Math.min(10, int(cooldown*20));
-				if (wep.pev.classname == "weapon_m16" && cooldown < 1) {
-					penalty = 5;
-				}
-				
-				state.wepDetections += penalty;
-				
-				//println("SPEEDHACK " + penalty);
-				//g_Log.PrintF("[AntiCheat] Speedhack on " + plr.pev.netname + " " + wep.pev.classname + " " + lessPrimaryAmmo + " " + lessPrimaryClip + " " + wasReload + " " + lessSecondaryAmmo +  " " + g_Engine.time + "\n");
+		if (bulletTimes !is null) {
+			bulletTimes.insertLast(g_Engine.time);
+			if (bulletTimes.size() > BULLET_HISTORY_SIZE) {
+				bulletTimes.removeAt(0);
 			}
 			
-			float diff = g_Engine.time - lastAttack;
-			//println("DIFF: " + diff);
+			uint bulletsToAnalyze = int(Math.max(3, (WEAPON_ANALYZE_TIME / cooldown) + 0.5f));
 			
-			state.nextAllowedAttack = g_Engine.time + cooldown;
+			if (wep.pev.classname == "weapon_m16") {
+				bulletsToAnalyze = 7;
+			}
 			
-			lastAttack = g_Engine.time;
+			if (bulletTimes.size() >= bulletsToAnalyze) {
+				float expectedDelta = (bulletsToAnalyze-1)*cooldown;
+				float firstBulletTime = bulletTimes[bulletTimes.size() - bulletsToAnalyze];
+				float actualDelta = g_Engine.time - firstBulletTime;
+				float speedError = actualDelta != 0 ? (expectedDelta / actualDelta) : 99999;
+				
+				string debugMsg = "" + wep.pev.classname + " Bullets: " + bulletsToAnalyze + ", Cooldown: " + cooldown + ", Error: " + speedError;
+				println(debugMsg);
+			
+				if (speedError > MAX_WEAPON_SPEEDUP) {
+					println("ZOMG HACKING");
+					
+					g_Log.PrintF("[AntiCheat] Speedhack on " + plr.pev.netname + " " +debugMsg + "\n");
+					kill_hacker(state, plr, "speedhacking");
+				}
+			}			
 		}
 	}
 	
