@@ -2,7 +2,7 @@
 const float MOVEMENT_HACK_RATIO_FAST = 1.1f; // how much actual and expected movement speed can differ
 const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much actual and expected movement speed can differ
 const float MOVEMENT_HACK_MIN = 96; // min movement speed before detecting speedhack (detection inaccurate at low values)
-const int HACK_DETECTION_MAX = 30; // max number of detections before killing player (expect some false positives)
+const int HACK_DETECTION_MAX = 20; // max number of detections before killing player (expect some false positives)
 const int MAX_CMDS_PER_SECOND = 220; // max number of commands/sec before it's speedhacking (200 max FPS + some buffer)
 const float WEAPON_COOLDOWN_EPSILON = 0.05f; // allow this much error in cooldown time
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min amount for damage)
@@ -77,10 +77,9 @@ void MapStart() {
 	g_speedhackPrimaryTime["weapon_displacer"] = 2.0;
 	g_speedhackPrimaryTime["weapon_tripmine"] = 0.305;
 	g_speedhackPrimaryTime["weapon_snark"] = 0.305;
-	g_speedhackPrimaryTime["weapon_crowbar"] = 0.25;
-	g_speedhackPrimaryTime["weapon_pipewrench"] = 0.58;
-	g_speedhackPrimaryTime["weapon_grapple"] = 0.5;
 	g_speedhackPrimaryTime["weapon_m16"] = 0.168;
+	
+	// melee weapons can't be speedhacked
 	
 	g_speedhackSecondaryTime["weapon_9mmAR"] = 1.0; // false positive when doing m2 after m1
 	g_speedhackSecondaryTime["weapon_m16"] = 2.3;
@@ -116,7 +115,6 @@ class SpeedState {
 	float lastPrimaryClip;
 	float lastPrimaryAmmo;
 	float lastSecondaryAmmo;
-	float lastNextPrimaryAttack;
 	float lastPacket;
 	float waitHackCheck; // wait before checking speedhack because player was lagged for a moment
 	bool wasWaiting = false;
@@ -158,7 +156,7 @@ void detect_speedhack() {
 			state.detections -= 1;
 		}
 		
-		//println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ")");
+		println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ")");
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
 			{	// log to file for debugging false positives
@@ -267,8 +265,6 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	avgActual /= float(state.lastSpeeds.size());
 	avgExpected /= float(state.lastSpeeds.size());
 	
-	//println("SPEED: " + int(avgActual) + " / " + int(avgExpected));
-	
 	if (avgExpected == 0) {
 		return 0;
 	}
@@ -298,9 +294,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	
 	if (errorRatio > 2 || errorRatio < 0.25f) {
 		sussyness = 2;
-	} else if (errorRatio > 4 || errorRatio < 0.125f) {
-		sussyness = 3;
-	} else if (errorRatio > 8 || errorRatio < 0.05f) {
+	} else if (errorRatio > 4 || errorRatio < 0.1f) {
 		sussyness = 4;
 	}
 	
@@ -315,10 +309,6 @@ int getPrimaryAmmo(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 
 int getSecondaryAmmo(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 	return wep.m_iSecondaryAmmoType > -1 ? plr.m_rgAmmo(wep.m_iSecondaryAmmoType) : 0;
-}
-
-bool isMelee(CBasePlayerWeapon@ wep) {
-	return wep.pev.classname == "weapon_crowbar" or wep.pev.classname == "weapon_pipewrench" or wep.pev.classname == "weapon_grapple";
 }
 
 // called after weapon shoot code
@@ -338,7 +328,6 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 		bool lessSecondaryAmmo = state.lastSecondaryAmmo > 0 && state.lastSecondaryAmmo > getSecondaryAmmo(plr, wep);
 		bool lessPrimaryClip = state.lastPrimaryClip > wep.m_iClip;
 		bool wasReload = wep.m_iClip > state.lastPrimaryClip;
-		bool meleeAttacked = wep.m_flNextPrimaryAttack != state.lastNextPrimaryAttack and isMelee(wep);
 		float timeSinceLastCheck = g_Engine.time - state.lastPacket;
 		
 		if (timeSinceLastCheck > LAGOUT_TIME) {
@@ -350,7 +339,6 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 		state.lastPrimaryClip = wep.m_iClip;
 		state.lastPrimaryAmmo = getPrimaryAmmo(plr, wep);
 		state.lastSecondaryAmmo = getSecondaryAmmo(plr, wep);
-		state.lastNextPrimaryAttack = wep.m_flNextPrimaryAttack;
 		state.lastPacket = g_Engine.time;
 		
 		if (state.waitHackCheck > g_Engine.time) {
@@ -374,7 +362,7 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 		array<float>@ bulletTimes = null;
 		
 		// primary fired?
-		if ((lessPrimaryAmmo || lessPrimaryClip || meleeAttacked) && !wasReload && g_speedhackPrimaryTime.exists(wep.pev.classname)) {
+		if ((lessPrimaryAmmo || lessPrimaryClip) && !wasReload && g_speedhackPrimaryTime.exists(wep.pev.classname)) {
 			g_speedhackPrimaryTime.get(wep.pev.classname, cooldown);
 			@bulletTimes = state.lastPrimaryShootTimes;
 		}
