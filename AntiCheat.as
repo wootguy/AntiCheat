@@ -13,6 +13,8 @@ const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
 const int MOVEMENT_HISTORY_SIZE = 10; // bigger = better lag tolerance, but short speedhacks are undetected
 const float LAGOUT_TIME = 0.3f; // pause speedhack checks if there's a gap in player commands longer than this
 const float LAGOUT_GRACE_PERIOD = 0.1f; // time to pause speedhack checks after lag spike.
+const int REPLAY_HISTORY_SIZE = 1024; // number of packets to remember per player, for debugging speedhack detections
+const string REPLAY_ROOT_PATH = "scripts/plugins/store/anticheat_replay/";
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
@@ -20,6 +22,7 @@ CCVar@ g_killPenalty;
 dictionary g_speedhackPrimaryTime; // weapon primary fires that are affected by speedhacking. Value is expected delay.
 dictionary g_speedhackSecondaryTime; // weapon secondary fires that are affected by speedhacking. Value is expected delay.
 dictionary g_speedhackMinBullets; // min bullets to analyze for being too fast (too low and laggy players get killed)
+dictionary g_weaponIds;
 
 array<SpeedState> g_speedStates(g_Engine.maxClients + 1);
 
@@ -95,8 +98,71 @@ void MapStart() {
 		g_loaded_enable_setting = true;
 	}
 	
+	g_weaponIds["weapon_9mmhandgun"] = 1; // longer for primary
+	g_weaponIds["weapon_eagle"] = 2;
+	g_weaponIds["weapon_uzi"] = 3;
+	g_weaponIds["weapon_357"] = 4;
+	g_weaponIds["weapon_9mmAR"] = 5;
+	g_weaponIds["weapon_shotgun"] = 6;
+	g_weaponIds["weapon_crossbow"] = 7;
+	g_weaponIds["weapon_rpg"] = 8;
+	g_weaponIds["weapon_gauss"] = 9;
+	g_weaponIds["weapon_hornetgun"] = 10;
+	g_weaponIds["weapon_handgrenade"] = 11;
+	g_weaponIds["weapon_satchel"] = 12;
+	g_weaponIds["weapon_sniperrifle"] = 13;
+	g_weaponIds["weapon_m249"] = 14;
+	g_weaponIds["weapon_sporelauncher"] = 15;
+	g_weaponIds["weapon_minigun"] = 16;
+	g_weaponIds["weapon_shockrifle"] = 17;
+	g_weaponIds["weapon_medkit"] = 18;
+	g_weaponIds["weapon_displacer"] = 19;
+	g_weaponIds["weapon_tripmine"] = 20;
+	g_weaponIds["weapon_snark"] = 21;
+	g_weaponIds["weapon_m16"] = 22;
+	
 	g_speedStates.resize(0);
 	g_speedStates.resize(g_Engine.maxClients + 1);
+}
+
+class PlayerFrame {
+	float time;
+	Vector origin;
+	Vector velocity;
+	Vector angles;
+	uint32 buttons;
+	float health;
+	uint8 weaponId;
+	uint8 weaponClip;
+	uint16 weaponAmmo;
+	uint16 weaponAmmo2;
+	uint8 moveDetections; // number of movement hack detections
+	
+	PlayerFrame() {}
+	
+	PlayerFrame(CBasePlayer@ plr, CBasePlayerWeapon@ wep, SpeedState@ state) {
+		this.time = g_Engine.time;
+		this.origin = plr.pev.origin;
+		this.velocity = plr.pev.velocity;
+		this.angles = plr.pev.v_angle;
+		this.buttons = plr.m_afButtonPressed | plr.m_afButtonLast;
+		this.moveDetections = state.detections;
+		this.health = plr.pev.health;
+		
+		if (wep !is null) {
+			this.weaponClip = wep.m_iClip;
+			this.weaponAmmo = getPrimaryAmmo(plr, wep);
+			this.weaponAmmo2 = getSecondaryAmmo(plr, wep);
+			g_weaponIds.get(wep.pev.classname, this.weaponId);
+		} else {
+			this.weaponId = 255;
+		}
+	}
+	
+	string toString() {
+		return "" + time + "_" + origin.ToString() + "_" + velocity.ToString() + "_" + angles.ToString() + "_" 
+				  + buttons + "_" + health + "_" + weaponId + "_" + weaponClip + "_" + weaponAmmo + "_" + weaponAmmo2 + "_" + moveDetections;
+	}
 }
 
 class SpeedState {
@@ -111,6 +177,7 @@ class SpeedState {
 	array<float> lastExpectedSpeeds;
 	array<float> lastPrimaryShootTimes;
 	array<float> lastSecondaryShootTimes;
+	array<PlayerFrame> replayHistory;
 	
 	float lastPrimaryClip;
 	float lastPrimaryAmmo;
@@ -156,7 +223,7 @@ void detect_speedhack() {
 			state.detections -= 1;
 		}
 		
-		println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ")");
+		//println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ")");
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
 			{	// log to file for debugging false positives
@@ -183,6 +250,33 @@ void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
 	float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
 	plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
 	g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[AntiCheat] " + plr.pev.netname + " was killed for " + reason + ".\n");
+	
+	writeReplayData(state, plr);
+}
+
+void writeReplayData(SpeedState@ state, CBasePlayer@ plr) {
+
+	DateTime now = DateTime();
+	string timeStr = "" + now.GetYear() + "-" + formatInt(now.GetMonth()+1, "0", 2) + "_" + formatInt(now.GetDayOfMonth()+1, "0", 2) + "_" + 
+					 formatInt(now.GetHour()+1, "0", 2) + "-" + formatInt(now.GetMinutes()+1, "0", 2) + "-" + formatInt(now.GetSeconds()+1, "0", 2);
+	string path = REPLAY_ROOT_PATH + timeStr + "__" + g_Engine.mapname + "__" + plr.pev.netname + ".txt";
+	
+	File@ f = g_FileSystem.OpenFile(path, OpenFile::WRITE);
+	
+	if (f is null or !f.IsOpen()) {
+		g_Log.PrintF("[AntiCheat] Failed to open replay file for writing: " + path + "\n");
+		return;
+	}
+	
+	for (uint i = 0; i < state.replayHistory.size(); i++) {
+		f.Write(state.replayHistory[i].toString() + "\n");
+	}
+	
+	f.Close();
+	
+	float duration = g_Engine.time - state.replayHistory[0].time;
+	
+	g_Log.PrintF("[AntiCheat] Wrote " + duration + "s replay file: " + path + "\n");
 }
 
 void detect_jumpbug() {
@@ -321,6 +415,11 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 	
 	// Detect if weapons are being shot too quickly
 	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
+	
+	state.replayHistory.insertLast(PlayerFrame(plr, wep, state));
+	if (state.replayHistory.size() > REPLAY_HISTORY_SIZE) {
+		state.replayHistory.removeAt(0);
+	}
 	
 	if (wep !is null) {
 		// primary fired
