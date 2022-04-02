@@ -26,8 +26,11 @@ dictionary g_weaponIds;
 
 array<SpeedState> g_speedStates(g_Engine.maxClients + 1);
 
+EHandle g_replay_ghost;
+
 bool g_enabled = false;
 bool g_loaded_enable_setting = false;
+bool g_debug_mode = false;
 
 array<Vector> g_testDirs = {
 	Vector(32, 0, 0),
@@ -43,7 +46,7 @@ void PluginInit() {
 	g_Module.ScriptInfo.SetAuthor( "w00tguy" );
 	g_Module.ScriptInfo.SetContactInfo( "https://github.com/wootguy" );
 	
-	g_Hooks.RegisterHook( Hooks::Player::PlayerUse, @PlayerUse );
+	g_Hooks.RegisterHook( Hooks::Player::PlayerPostThink, @PlayerPostThink );
 	
 	g_Scheduler.SetInterval("detect_speedhack", 0.05f, -1);
 	g_Scheduler.SetInterval("detect_jumpbug", 0.0f, -1);
@@ -54,7 +57,14 @@ void PluginInit() {
 	MapStart();
 }
 
+void PluginExit() {
+	g_EntityFuncs.Remove(g_replay_ghost);
+}
+
 void MapStart() {
+	if (g_debug_mode)
+		g_CustomEntityFuncs.RegisterCustomEntity( "monster_ghost", "monster_ghost" );
+	
 	CBasePlayerWeapon@ mp5 = cast<CBasePlayerWeapon@>(g_EntityFuncs.CreateEntity("weapon_9mmAR", null, true));
 	bool isClassicMap = mp5.iMaxClip() == 50;
 	g_EntityFuncs.Remove(mp5);
@@ -159,11 +169,69 @@ class PlayerFrame {
 		}
 	}
 	
+	// load from file
+	PlayerFrame(CBasePlayer@ plr, string line) {
+		array<string> parts = line.Split("_");
+		if (parts.size() != 11) {
+			g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "[AntiCheat] Incompatible replay file.\n");
+			return;
+		}
+		
+		time = atof(parts[0]);
+		g_Utility.StringToVector(origin, parts[1], ",");
+		g_Utility.StringToVector(velocity, parts[2], ",");
+		g_Utility.StringToVector(angles, parts[3], ",");
+		buttons = atoi(parts[4]);
+		health = atof(parts[5]);
+		weaponId = atoi(parts[6]);
+		weaponClip = atoi(parts[7]);
+		weaponAmmo = atoi(parts[8]);
+		weaponAmmo2 = atoi(parts[9]);
+		moveDetections = atoi(parts[10]);
+	}
+	
 	string toString() {
 		return "" + time + "_" + origin.ToString() + "_" + velocity.ToString() + "_" + angles.ToString() + "_" 
 				  + buttons + "_" + health + "_" + weaponId + "_" + weaponClip + "_" + weaponAmmo + "_" + weaponAmmo2 + "_" + moveDetections;
 	}
 }
+
+class monster_ghost : ScriptBaseMonsterEntity
+{	
+	bool KeyValue( const string& in szKey, const string& in szValue )
+	{
+		return BaseClass.KeyValue( szKey, szValue );
+	}
+	
+	void Spawn()
+	{		
+		pev.movetype = MOVETYPE_FLY;
+		pev.solid = SOLID_NOT;
+		
+		g_EntityFuncs.SetModel(self, self.pev.model);		
+		g_EntityFuncs.SetSize(self.pev, Vector( -16, -16, -36), Vector(16, 16, 36));
+		g_EntityFuncs.SetOrigin( self, pev.origin);
+
+		//SetThink( ThinkFunction( CustomThink ) );
+		
+		pev.takedamage = DAMAGE_NO;
+		pev.health = 1;
+		
+		self.MonsterInit();
+		
+		self.m_MonsterState = MONSTERSTATE_NONE;
+		
+		self.m_IdealActivity = ACT_RELOAD;
+		self.ClearSchedule();
+	}
+	
+	Schedule@ GetSchedule( void )
+	{
+		// prevent default schedules changing the animation
+		pev.nextthink = g_Engine.time + Math.max(0.1f, 0.1f);
+		return BaseClass.GetScheduleOfType(SCHED_RELOAD);
+	}
+};
 
 class SpeedState {
 	int detections; // number of times speedhack detections (many false positives with bad connection)
@@ -194,9 +262,9 @@ uint32 getPlayerBit(CBaseEntity@ plr) {
 }
 
 void detect_speedhack() {
-	if (!g_enabled) {
-		return;
-	}
+	//if (!g_enabled) {
+	//	return;
+	//}
 	
 	for (int i = 1; i <= g_Engine.maxClients; i++) {
 		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
@@ -246,12 +314,23 @@ void detect_speedhack() {
 }
 
 void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
-	plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
-	float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
-	plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
-	g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[AntiCheat] " + plr.pev.netname + " was killed for " + reason + ".\n");
+	if (g_enabled) {
+		plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
+		float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
+		plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
+		g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[AntiCheat] " + plr.pev.netname + " was killed for " + reason + ".\n");
+	} else {
+		g_PlayerFuncs.ClientPrintAll(HUD_PRINTCONSOLE, "[AntiCheat] " + plr.pev.netname + " " + reason + ".\n");
+	}
 	
 	writeReplayData(state, plr);
+	
+	state.detections = 0;
+	state.lastSpeeds.resize(0);
+	state.lastExpectedSpeeds.resize(0);
+	state.lastPrimaryShootTimes.resize(0);
+	state.lastSecondaryShootTimes.resize(0);
+	state.replayHistory.resize(0);
 }
 
 void writeReplayData(SpeedState@ state, CBasePlayer@ plr) {
@@ -279,10 +358,48 @@ void writeReplayData(SpeedState@ state, CBasePlayer@ plr) {
 	g_Log.PrintF("[AntiCheat] Wrote " + duration + "s replay file: " + path + "\n");
 }
 
-void detect_jumpbug() {
-	if (!g_enabled) {
+void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, int startFrame, float speed, int lastFrame) {
+	CBaseEntity@ ghost = h_ghost;
+	
+	if (ghost is null) {
 		return;
 	}
+	
+	float t = (g_Engine.time - startTime)*speed;
+	if (t + frames[startFrame].time > frames[frames.size()-1].time + 1.0f*speed) { 
+		startTime = g_Engine.time;
+	}
+	
+	for (int i = int(frames.size())-1; i >= startFrame; i--) {
+		if (t + frames[startFrame].time >= frames[i].time) {
+			PlayerFrame@ frame = frames[i];
+			ghost.pev.origin = frame.origin;
+			ghost.pev.angles = frame.angles;
+			
+			if (i != lastFrame) {
+				int nextFrameTime = i < int(frames.size())-1 ? int((frames[i+1].time - frame.time)*1000) : -1;
+				println("Time: " + formatFloat(t, "", 6, 3)
+						+ ", Frame " + formatInt(i, "", 3)
+						+ ", Speed: " + formatInt(int(frame.velocity.Length()), "", 4)
+						+ ", Buttons: " + formatInt(frame.buttons, "", 5)
+						+ ", HP: " + formatInt(int(frame.health), "", 3)
+						+ ", detections: " + formatInt(frame.moveDetections, "", 2)
+						+ ", nextFrame: " + formatInt(nextFrameTime, "", 3) + "ms");
+			}
+			
+			lastFrame = i;
+			
+			break;
+		}
+	}
+	
+	g_Scheduler.SetTimeout("debug_replay", 0.0f, h_ghost, @frames, startTime, startFrame, speed, lastFrame);
+}
+
+void detect_jumpbug() {
+	//if (!g_enabled) {
+	//	return;
+	//}
 	
 	for (int i = 1; i <= g_Engine.maxClients; i++) {
 		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
@@ -318,8 +435,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 
 	Vector originDiff = plr.pev.origin - state.lastOrigin;
 	
-	// going up/down slopes makes velocity appear faster than it is
-	originDiff.z = 0;
+	
 	
 	Vector expectedVelocity = plr.pev.velocity + plr.pev.basevelocity;
 	if (plr.pev.FlagBitSet(FL_ONGROUND) && plr.pev.groundentity !is null) {
@@ -331,6 +447,10 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 		
 		expectedVelocity = expectedVelocity + pTrain.pev.velocity;
 	}
+	
+	// going up/down slopes makes velocity appear faster than it is
+	originDiff.z = 0;
+	expectedVelocity.z = 0;
 	
 	float expectedSpeed = (expectedVelocity).Length();
 	float actualSpeed = originDiff.Length() * (1.0f / timeSinceLastCheck);
@@ -406,10 +526,10 @@ int getSecondaryAmmo(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 }
 
 // called after weapon shoot code
-HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
-	if (!g_enabled) {
-		return HOOK_CONTINUE;
-	}
+HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
+	//if (!g_enabled) {
+	//	return HOOK_CONTINUE;
+	//}
 
 	SpeedState@ state = g_speedStates[plr.entindex()];	
 	
@@ -509,6 +629,7 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 
 
 CClientCommand _anticheat("anticheat", "AntiCheat", @anticheatToggle );
+CClientCommand _replay("replaycheat", "AntiCheat", @replayCheater );
 
 void anticheatToggle( const CCommand@ args )
 {
@@ -516,4 +637,66 @@ void anticheatToggle( const CCommand@ args )
 	g_enabled = !g_enabled;
 	
 	g_PlayerFuncs.SayText(plr, "[AntiCheat] " + (g_enabled ? "Enabled." : "Disabled."));
+}
+
+void replayCheater( const CCommand@ args )
+{
+	CBasePlayer@ plr = g_ConCommandSystem.GetCurrentPlayer();
+	
+	string path = REPLAY_ROOT_PATH + args[1];
+	int frameOffset = atoi(args[2]);
+	float speed = atof(args[3]);
+	if (speed == 0)
+		speed = 1;
+		
+	if (int(path.Find(".txt")) == -1) {
+		path = path + ".txt";
+	}
+	
+	println("REPLAY  " + path);
+	
+	File@ file = g_FileSystem.OpenFile(path, OpenFile::READ);
+	
+	if (file is null or !file.IsOpen()) {
+		g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "[AntiCheat] replay file not found: " + path + "\n");
+		return;
+	}
+	
+	array<PlayerFrame> frames;
+	
+	while (!file.EOFReached()) {
+		string line;
+		file.ReadLine(line);
+		
+		if (line.IsEmpty()) {
+			continue;
+		}
+		
+		frames.insertLast(PlayerFrame(plr, line));
+	}
+	
+	file.Close();	
+	
+	dictionary keys;
+	keys["origin"] = frames[0].origin.ToString();
+	keys["model"] = "models/player.mdl";
+	keys["minhullsize"] = "-16 -16 -36";
+	keys["maxhullsize"] = "16 16 36";
+	//keys["rendermode"] = "2";
+	//keys["renderamt"] = "255";
+	//keys["targetname"] = ghostName; // NOTE: targetname causes animation glitches when spawned (schedule != RELOAD)
+	CBaseEntity@ ent = g_EntityFuncs.CreateEntity(g_debug_mode ? "monster_ghost" : "env_model", keys, true);
+	
+	ent.pev.solid = SOLID_NOT;
+	ent.pev.movetype = MOVETYPE_FLY;
+	ent.pev.takedamage = 0;
+	ent.pev.flags |= EF_NOINTERP;
+	
+	g_EntityFuncs.Remove(g_replay_ghost);
+	g_replay_ghost = ent;
+	
+	plr.pev.origin = frames[frames.size()-1].origin;
+	
+	println("Start " + frames.size() + " replay from " + frames[0].time);
+	g_Scheduler.SetTimeout("debug_replay", 0.5f, g_replay_ghost, frames, g_Engine.time, frameOffset, speed, -1);
 }
