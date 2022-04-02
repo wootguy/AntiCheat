@@ -11,6 +11,8 @@ const float WEAPON_ANALYZE_TIME = 1.5f; // minimum continous shooting time to de
 const float MIN_BULLET_DELAY = 0.05f; // little faster than the fastest shooting weapon
 const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
 const int MOVEMENT_HISTORY_SIZE = 10; // bigger = better lag tolerance, but short speedhacks are undetected
+const float LAGOUT_TIME = 0.3f; // pause speedhack checks if there's a gap in player commands longer than this
+const float LAGOUT_GRACE_PERIOD = 0.1f; // time to pause speedhack checks after lag spike.
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
@@ -20,6 +22,9 @@ dictionary g_speedhackSecondaryTime; // weapon secondary fires that are affected
 dictionary g_speedhackMinBullets; // min bullets to analyze for being too fast (too low and laggy players get killed)
 
 array<SpeedState> g_speedStates(g_Engine.maxClients + 1);
+
+bool g_enabled = false;
+bool g_loaded_enable_setting = false;
 
 array<Vector> g_testDirs = {
 	Vector(32, 0, 0),
@@ -40,10 +45,10 @@ void PluginInit() {
 	g_Scheduler.SetInterval("detect_speedhack", 0.05f, -1);
 	g_Scheduler.SetInterval("detect_jumpbug", 0.0f, -1);
 	
-	MapStart();
-	
 	@g_enable = CCVar("enable", 1, "Toggle anticheat", ConCommandFlag::AdminOnly);
 	@g_killPenalty = CCVar("kill_penalty", 6, "respawn delay for killed speedhackers", ConCommandFlag::AdminOnly);
+	
+	MapStart();
 }
 
 void MapStart() {
@@ -85,6 +90,14 @@ void MapStart() {
 		g_speedhackPrimaryTime["weapon_shotgun"] = 0.255;
 		g_speedhackPrimaryTime["weapon_9mmAR"] = 0.09;
 	}
+	
+	if (!g_loaded_enable_setting) {
+		g_enabled = g_enable.GetInt() != 0;
+		g_loaded_enable_setting = true;
+	}
+	
+	g_speedStates.resize(0);
+	g_speedStates.resize(g_Engine.maxClients + 1);
 }
 
 class SpeedState {
@@ -104,6 +117,9 @@ class SpeedState {
 	float lastPrimaryAmmo;
 	float lastSecondaryAmmo;
 	float lastNextPrimaryAttack;
+	float lastPacket;
+	float waitHackCheck; // wait before checking speedhack because player was lagged for a moment
+	bool wasWaiting = false;
 	
 	SpeedState() {}
 }
@@ -113,7 +129,7 @@ uint32 getPlayerBit(CBaseEntity@ plr) {
 }
 
 void detect_speedhack() {
-	if (g_enable.GetInt() == 0) {
+	if (!g_enabled) {
 		return;
 	}
 	
@@ -125,6 +141,11 @@ void detect_speedhack() {
 		}
 		
 		SpeedState@ state = g_speedStates[plr.entindex()];
+		
+		if (state.waitHackCheck > g_Engine.time) {
+			continue;
+		}
+		
 		float timeSinceLastCheck = g_Engine.time - state.lastDetectTime;
 		state.lastDetectTime = g_Engine.time;
 		
@@ -167,7 +188,7 @@ void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
 }
 
 void detect_jumpbug() {
-	if (g_enable.GetInt() == 0) {
+	if (!g_enabled) {
 		return;
 	}
 	
@@ -302,6 +323,10 @@ bool isMelee(CBasePlayerWeapon@ wep) {
 
 // called after weapon shoot code
 HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
+	if (!g_enabled) {
+		return HOOK_CONTINUE;
+	}
+
 	SpeedState@ state = g_speedStates[plr.entindex()];	
 	
 	// Detect if weapons are being shot too quickly
@@ -314,11 +339,29 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 		bool lessPrimaryClip = state.lastPrimaryClip > wep.m_iClip;
 		bool wasReload = wep.m_iClip > state.lastPrimaryClip;
 		bool meleeAttacked = wep.m_flNextPrimaryAttack != state.lastNextPrimaryAttack and isMelee(wep);
+		float timeSinceLastCheck = g_Engine.time - state.lastPacket;
+		
+		if (timeSinceLastCheck > LAGOUT_TIME) {
+			// got disconnected for a moment
+			//println("DISCONNECTED FOR A MMOMENT " + timeSinceLastCheck);
+			state.waitHackCheck = g_Engine.time + LAGOUT_GRACE_PERIOD; // a huge batch of packets is probably coming. Ignore it.
+		}
 		
 		state.lastPrimaryClip = wep.m_iClip;
 		state.lastPrimaryAmmo = getPrimaryAmmo(plr, wep);
 		state.lastSecondaryAmmo = getSecondaryAmmo(plr, wep);
 		state.lastNextPrimaryAttack = wep.m_flNextPrimaryAttack;
+		state.lastPacket = g_Engine.time;
+		
+		if (state.waitHackCheck > g_Engine.time) {
+			state.wasWaiting = true;
+			return HOOK_CONTINUE;
+		}
+		
+		if (state.wasWaiting) {
+			//println("Resume hax check");
+			state.wasWaiting = false;
+		}
 		
 		if (wep.entindex() != state.lastWepId) {
 			state.lastWepId = wep.entindex();
@@ -375,4 +418,15 @@ HookReturnCode PlayerUse( CBasePlayer@ plr, uint& out uiFlags ) {
 	
 	
 	return HOOK_CONTINUE;
+}
+
+
+CClientCommand _anticheat("anticheat", "AntiCheat", @anticheatToggle );
+
+void anticheatToggle( const CCommand@ args )
+{
+	CBasePlayer@ plr = g_ConCommandSystem.GetCurrentPlayer();
+	g_enabled = !g_enabled;
+	
+	g_PlayerFuncs.SayText(plr, "[AntiCheat] " + (g_enabled ? "Enabled." : "Disabled."));
 }
