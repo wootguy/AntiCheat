@@ -34,7 +34,13 @@ array<SpeedState> g_speedStates(g_Engine.maxClients + 1);
 
 EHandle g_replay_ghost;
 
-bool g_enabled = false;
+enum MODE {
+	MODE_DISABLE, // disable all checks (for testing server lag)
+	MODE_ENABLE,  // kill speedhackers
+	MODE_OBSERVE  // detect cheats and write replay data but don't kill anyone
+}
+
+int g_mode = MODE_OBSERVE;
 bool g_loaded_enable_setting = false;
 bool g_debug_mode = false;
 
@@ -73,7 +79,7 @@ void MapStart() {
 	init();
 	
 	if (!g_loaded_enable_setting) {
-		g_enabled = g_enable.GetInt() != 0;
+		g_mode = g_enable.GetInt();
 		g_loaded_enable_setting = true;
 	}
 }
@@ -304,9 +310,9 @@ uint32 getPlayerBit(CBaseEntity@ plr) {
 }
 
 void detect_speedhack() {
-	//if (!g_enabled) {
-	//	return;
-	//}
+	if (g_mode == MODE_DISABLE) {
+		return;
+	}
 	
 	for (int i = 1; i <= g_Engine.maxClients; i++) {
 		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
@@ -383,7 +389,7 @@ bool is_near_teleport_destination(CBasePlayer@ plr) {
 }
 
 void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
-	if (g_enabled) {
+	if (g_mode == MODE_ENABLE) {
 		plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
 		float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
 		plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
@@ -487,9 +493,9 @@ void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, 
 }
 
 void detect_jumpbug() {
-	//if (!g_enabled) {
-	//	return;
-	//}
+	if (g_mode == MODE_DISABLE) {
+		return;
+	}
 	
 	for (int i = 1; i <= g_Engine.maxClients; i++) {
 		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
@@ -641,9 +647,9 @@ int getSecondaryAmmo(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 }
 
 HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
-	//if (!g_enabled) {
-	//	return HOOK_CONTINUE;
-	//}
+	if (g_mode == MODE_DISABLE) {
+		return HOOK_CONTINUE;
+	}
 
 	SpeedState@ state = g_speedStates[plr.entindex()];	
 	
@@ -747,9 +753,16 @@ CClientCommand _replay("rpcheat", "AntiCheat", @replayCheater );
 void anticheatToggle( const CCommand@ args )
 {
 	CBasePlayer@ plr = g_ConCommandSystem.GetCurrentPlayer();
-	g_enabled = !g_enabled;
+	g_mode = Math.max(0, Math.min(MODE_OBSERVE, atoi(args[1])));
 	
-	g_PlayerFuncs.SayText(plr, "[AntiCheat] " + (g_enabled ? "Enabled." : "Disabled."));
+	string newMode = "Enabled.";
+	if (g_mode == MODE_DISABLE) {
+		newMode = "Disabled.";
+	} else if (g_mode == MODE_OBSERVE) {
+		newMode = "Observing.";
+	}
+	
+	g_PlayerFuncs.SayText(plr, "[AntiCheat] " + newMode + "\n");
 }
 
 void replayCheater( const CCommand@ args )
