@@ -1,3 +1,5 @@
+// TODO:
+// - pausing near pushing entities is overkill yet still triggers false positives
 
 const float MOVEMENT_HACK_RATIO_FAST = 1.1f; // how much actual and expected movement speed can differ
 const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much actual and expected movement speed can differ
@@ -10,11 +12,15 @@ const float MAX_WEAPON_SPEEDUP = 1.3f; // max allowed speedhack on weapons (too 
 const float WEAPON_ANALYZE_TIME = 1.5f; // minimum continous shooting time to detect hacking
 const float MIN_BULLET_DELAY = 0.05f; // little faster than the fastest shooting weapon
 const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
-const int MOVEMENT_HISTORY_SIZE = 10; // bigger = better lag tolerance, but short speedhacks are undetected
-const float LAGOUT_TIME = 0.3f; // pause speedhack checks if there's a gap in player commands longer than this
+const int MOVEMENT_HISTORY_SIZE = 8; // bigger = better lag tolerance, but short speedhacks are undetected
+const float LAGOUT_TIME = 0.1f; // pause speedhack checks if there's a gap in player commands longer than this
 const float LAGOUT_GRACE_PERIOD = 0.1f; // time to pause speedhack checks after lag spike.
 const int REPLAY_HISTORY_SIZE = 1024; // number of packets to remember per player, for debugging speedhack detections
 const string REPLAY_ROOT_PATH = "scripts/plugins/store/anticheat_replay/";
+const float AFK_TIME = 5.0f; // min time to not be pressing buttons before speedhack checks are disabled
+const float MOVING_OBJECT_PAUSE_TIME = 0.5f; // fix false postives when rubbing past or jumping off a moving platform
+const float TELEPORT_PAUSE = 0.1f; // fix false postives when teleporting
+const float TELEPORT_RADIUS = 128; // radius around teleport destinations to ignore speedhacks (should be big enough to allow 0.05 seconds of movement after teleporting)
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
@@ -33,10 +39,12 @@ bool g_loaded_enable_setting = false;
 bool g_debug_mode = false;
 
 array<Vector> g_testDirs = {
-	Vector(32, 0, 0),
-	Vector(-32, 0, 0),
-	Vector(0, 32, 0),
-	Vector(0, -32, 0)
+	Vector(8, 0, 0),
+	Vector(-8, 0, 0),
+	Vector(0, 8, 0),
+	Vector(0, -8, 0),
+	Vector(0, 0, 8),
+	Vector(0, 0, -8)
 };
 
 void print(string text) { g_Game.AlertMessage( at_console, text); }
@@ -54,7 +62,7 @@ void PluginInit() {
 	@g_enable = CCVar("enable", 1, "Toggle anticheat", ConCommandFlag::AdminOnly);
 	@g_killPenalty = CCVar("kill_penalty", 6, "respawn delay for killed speedhackers", ConCommandFlag::AdminOnly);
 	
-	MapStart();
+	init();
 }
 
 void PluginExit() {
@@ -62,6 +70,15 @@ void PluginExit() {
 }
 
 void MapStart() {
+	init();
+	
+	if (!g_loaded_enable_setting) {
+		g_enabled = g_enable.GetInt() != 0;
+		g_loaded_enable_setting = true;
+	}
+}
+
+void init() {
 	if (g_debug_mode)
 		g_CustomEntityFuncs.RegisterCustomEntity( "monster_ghost", "monster_ghost" );
 	
@@ -103,11 +120,6 @@ void MapStart() {
 		g_speedhackPrimaryTime["weapon_9mmAR"] = 0.09;
 	}
 	
-	if (!g_loaded_enable_setting) {
-		g_enabled = g_enable.GetInt() != 0;
-		g_loaded_enable_setting = true;
-	}
-	
 	g_weaponIds["weapon_9mmhandgun"] = 1; // longer for primary
 	g_weaponIds["weapon_eagle"] = 2;
 	g_weaponIds["weapon_uzi"] = 3;
@@ -134,6 +146,32 @@ void MapStart() {
 	g_speedStates.resize(0);
 	g_speedStates.resize(g_Engine.maxClients + 1);
 }
+
+// order should match weapon ids
+array<string> g_weapon_sounds = {
+	"weapons/pl_gun3.wav",
+	"weapons/desert_eagle_fire.wav",
+	"weapons/uzi/shoot1.wav",
+	"weapons/357_shot1.wav",
+	"weapons/hks1.wav",
+	"weapons/sbarrel1.wav",
+	"weapons/xbow_fire1.wav",
+	"weapons/rocketfire1.wav",
+	"weapons/gauss2.wav",
+	"agrunt/ag_fire1.wav",
+	"weapons/grenade_hit1.wav",
+	"weapons/g_bounce1.wav",
+	"weapons/sniper_fire.wav",
+	"weapons/saw_fire1.wav",
+	"weapons/splauncher_fire.wav",
+	"hassault/hw_shoot2.wav",
+	"weapons/shock_fire.wav",
+	"weapons/medshot4.wav",
+	"weapons/displacer_fire.wav",
+	"weapons/mine_deploy.wav",
+	"squeek/sqk_hunt2.wav",
+	"weapons/m16_3round.wav"
+};
 
 class PlayerFrame {
 	float time;
@@ -240,6 +278,10 @@ class SpeedState {
 	Vector lastVelocity;
 	float lastHealth;
 	int lastWepId = -1;
+	float lastButtonPress = 0; // last time any buttons were pressed/held
+	float lastMovingObjectContact = 0;
+	float lastTeleport = 0; // ignore speedhacks shortle after teleporting
+	float lastWaterLevel = 0;
 
 	array<float> lastSpeeds;
 	array<float> lastExpectedSpeeds;
@@ -275,14 +317,42 @@ void detect_speedhack() {
 		
 		SpeedState@ state = g_speedStates[plr.entindex()];
 		
-		if (state.waitHackCheck > g_Engine.time) {
+		float timeSinceLastPacket = g_Engine.time - state.lastPacket;
+		float timeSinceLastCheck = g_Engine.time - state.lastDetectTime;
+		float timeSinceLastButton = g_Engine.time - state.lastButtonPress;
+		float timeSinceLastTeleport = g_Engine.time - state.lastTeleport;
+		bool isNoclipping = plr.pev.movetype == MOVETYPE_NOCLIP;
+		state.lastDetectTime = g_Engine.time;
+		
+		if (timeSinceLastButton > AFK_TIME) {
+			// prevent AFK ropes triggering speedhacks
+			//println("AFK IGNORE");
 			continue;
 		}
 		
-		float timeSinceLastCheck = g_Engine.time - state.lastDetectTime;
-		state.lastDetectTime = g_Engine.time;
+		if (timeSinceLastPacket > LAGOUT_TIME) {
+			// got disconnected for a moment
+			println("DISCONNECTED FOR A MMOMENT " + timeSinceLastCheck);
+			state.waitHackCheck = g_Engine.time + LAGOUT_GRACE_PERIOD; // a huge batch of packets is probably coming. Ignore it.
+		}
+		
+		if (timeSinceLastPacket > LAGOUT_TIME or state.waitHackCheck > g_Engine.time) {
+			state.lastOrigin = plr.pev.origin;
+			//println("PAUSE (lag)");
+			continue;
+		}
 		
 		int sussyMovement = detect_movement_speedhack(state, plr, timeSinceLastCheck);
+		
+		float timeSinceLastMovingObjectTouch = g_Engine.time - state.lastMovingObjectContact;
+		if (timeSinceLastMovingObjectTouch < MOVING_OBJECT_PAUSE_TIME or isNoclipping or timeSinceLastTeleport < TELEPORT_PAUSE) {
+			//println("PAUSE (Object/teleport)");
+			state.lastOrigin = plr.pev.origin;
+			state.lastSpeeds.resize(0);
+			state.lastExpectedSpeeds.resize(0);
+			state.detections = 0;
+			continue;
+		}
 		
 		if (sussyMovement > 0) {
 			state.detections += sussyMovement;
@@ -291,26 +361,25 @@ void detect_speedhack() {
 			state.detections -= 1;
 		}
 		
-		//println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ")");
+		//println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ") " + timeSinceLastPacket);
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
-			{	// log to file for debugging false positives
-				string wepName = "(no wep)";
-				CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
-				if (wep !is null) {
-					wepName = wep.pev.classname;
-				}
-				
-				string debugStr = "[AntiCheat] Killed " + plr.pev.netname + " at " + plr.pev.origin.ToString() + " for ("
-							+ sussyMovement + " " + plr.pev.velocity.Length() + ") " + "\n";
-				g_Log.PrintF(debugStr);
-			}
-			
-			state.detections = 0;
-			
 			kill_hacker(state, plr, "speedhacking");
 		}
 	}
+}
+
+bool is_near_teleport_destination(CBasePlayer@ plr) {
+	CBaseEntity@ ent = null;
+	do {
+		@ent = g_EntityFuncs.FindEntityInSphere(ent, plr.pev.origin, TELEPORT_RADIUS, "info_teleport_destination", "classname"); 
+		if (ent !is null)
+		{
+			return true;
+		}
+	} while (ent !is null);
+	
+	return false;
 }
 
 void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
@@ -318,9 +387,14 @@ void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
 		plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
 		float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
 		plr.m_flRespawnDelayTime = Math.max(g_killPenalty.GetInt(), defaultRespawnDelay) - defaultRespawnDelay;
-		g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, "[AntiCheat] " + plr.pev.netname + " was killed for " + reason + ".\n");
+		
+		string msg = "[AntiCheat] " + plr.pev.netname + " was killed for " + reason + ".\n";
+		g_PlayerFuncs.ClientPrintAll(HUD_PRINTNOTIFY, msg);
+		g_Log.PrintF(msg);
 	} else {
-		g_PlayerFuncs.ClientPrintAll(HUD_PRINTCONSOLE, "[AntiCheat] " + plr.pev.netname + " " + reason + ".\n");
+		string msg = "[AntiCheat] " + plr.pev.netname + " " + reason + ".\n";
+		g_PlayerFuncs.ClientPrintAll(HUD_PRINTCONSOLE, msg);
+		g_Log.PrintF(msg);
 	}
 	
 	writeReplayData(state, plr);
@@ -355,7 +429,7 @@ void writeReplayData(SpeedState@ state, CBasePlayer@ plr) {
 	
 	float duration = g_Engine.time - state.replayHistory[0].time;
 	
-	g_Log.PrintF("[AntiCheat] Wrote " + duration + "s replay file: " + path + "\n");
+	println("[AntiCheat] Wrote " + duration + "s replay file: " + path + "\n");
 }
 
 void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, int startFrame, float speed, int lastFrame) {
@@ -372,19 +446,35 @@ void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, 
 	
 	for (int i = int(frames.size())-1; i >= startFrame; i--) {
 		if (t + frames[startFrame].time >= frames[i].time) {
-			PlayerFrame@ frame = frames[i];
-			ghost.pev.origin = frame.origin;
-			ghost.pev.angles = frame.angles;
-			
 			if (i != lastFrame) {
-				int nextFrameTime = i < int(frames.size())-1 ? int((frames[i+1].time - frame.time)*1000) : -1;
-				println("Time: " + formatFloat(t, "", 6, 3)
-						+ ", Frame " + formatInt(i, "", 3)
-						+ ", Speed: " + formatInt(int(frame.velocity.Length()), "", 4)
-						+ ", Buttons: " + formatInt(frame.buttons, "", 5)
-						+ ", HP: " + formatInt(int(frame.health), "", 3)
-						+ ", detections: " + formatInt(frame.moveDetections, "", 2)
-						+ ", nextFrame: " + formatInt(nextFrameTime, "", 3) + "ms");
+				for (int k = lastFrame+1; k <= i; k++) {
+					PlayerFrame@ frame = frames[k];
+					ghost.pev.origin = frame.origin;
+					ghost.pev.angles = frame.angles;
+			
+					if (lastFrame >= 0 and lastFrame < i) {
+						bool shotWeapon = frames[k-1].weaponAmmo > frames[k].weaponAmmo
+											|| frames[k-1].weaponClip > frames[k].weaponClip;
+						if (shotWeapon) {
+							uint8 sndId = frame.weaponId-1;
+							if (sndId > 0 and sndId < g_weapon_sounds.size()) {
+								g_SoundSystem.PlaySound(ghost.edict(), CHAN_AUTO, g_weapon_sounds[sndId], 1.0f, 0.0f, 0, 100);
+							}
+						}
+					}
+					
+					int nextFrameTime = k < int(frames.size())-1 ? int((frames[k+1].time - frame.time)*1000) : -1;
+					println("Time: " + formatFloat(t, "", 6, 3)
+							+ ", Frame " + formatInt(k, "", 3)
+							//+ ", FrameTime " + formatFloat(frame.time, "", 6, 3)
+							+ ", Speed: " + formatInt(int(frame.velocity.Length()), "", 4)
+							+ ", Buttons: " + formatInt(frame.buttons, "", 5)
+							+ ", Weapon: " + formatInt(frame.weaponId, "", 2)
+							+ ", Ammo: " + formatInt(frame.weaponClip, "", 3) + " " + formatInt(frame.weaponAmmo, "", 3)
+							+ ", HP: " + formatInt(int(frame.health), "", 3)
+							+ ", detections: " + formatInt(frame.moveDetections, "", 2)
+							+ ", nextFrame: " + formatInt(nextFrameTime, "", 3) + "ms");
+				}
 			}
 			
 			lastFrame = i;
@@ -410,20 +500,20 @@ void detect_jumpbug() {
 		
 		SpeedState@ state = g_speedStates[plr.entindex()];
 		bool jumpedInstantlyAfterLanding = state.lastVelocity.z < -JUMPBUG_SPEED and plr.pev.velocity.z > 128;
-		bool perfectlyTimedJump = plr.m_afButtonPressed & (IN_JUMP | IN_DUCK) != 0;
-		bool preventedDamage = plr.pev.health == state.lastHealth;
+		bool perfectlyTimedJump = (plr.m_afButtonPressed | plr.m_afButtonReleased) & (IN_JUMP | IN_DUCK) != 0;
+		bool preventedDamage = plr.pev.health == state.lastHealth and plr.pev.waterlevel == 0;
 		
-		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage) {
-			{	// log to file for debugging false positives
-				string debugStr = "[AntiCheat] Killed " + plr.pev.netname + " for jumpbug (" + state.lastVelocity.z + " " + plr.pev.velocity.z + " " + plr.m_afButtonPressed + ")\n";
-				g_Log.PrintF(debugStr);
-			}
-		
+		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage)  {
 			kill_hacker(state, plr, "using the jumpbug cheat");
 		}
 		
 		state.lastVelocity = plr.pev.velocity;
 		state.lastHealth = plr.pev.health;
+		
+		if (plr.pev.fixangle != 0) {
+			// must have been teleported
+			state.lastTeleport = g_Engine.time;
+		}
 	}
 }
 
@@ -435,17 +525,50 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 
 	Vector originDiff = plr.pev.origin - state.lastOrigin;
 	
-	
-	
 	Vector expectedVelocity = plr.pev.velocity + plr.pev.basevelocity;
 	if (plr.pev.FlagBitSet(FL_ONGROUND) && plr.pev.groundentity !is null) {
 		CBaseEntity@ pTrain = g_EntityFuncs.Instance( plr.pev.groundentity );
 		
 		if (pTrain is null or pTrain.pev.avelocity.Length() >= 1) {
+			state.lastOrigin = plr.pev.origin;
+			state.lastMovingObjectContact = g_Engine.time;
 			return 0; // too complicated to calculate where the player is expected to be
 		}
 		
 		expectedVelocity = expectedVelocity + pTrain.pev.velocity;
+	}
+	
+	{
+		// TODO: calculate inbetween conveyors (hl_c09 smasher section)
+		TraceResult tr;		
+		g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + Vector(0,0,-32), ignore_monsters, human_hull, plr.edict(), tr );
+		CBaseEntity@ pStand = g_EntityFuncs.Instance( tr.pHit );
+		
+		if (pStand !is null and pStand.pev.classname == "func_conveyor") {
+			state.lastOrigin = plr.pev.origin;
+			state.lastMovingObjectContact = g_Engine.time;
+			return 0; // ignore speedhack on conveyor
+		}
+	}
+	
+	// being pushed by entities doesn't update velocity, so allow faster movement around moving ents
+	Vector start = plr.pev.origin;
+	for (uint i = 0; i < g_testDirs.size(); i++) {
+		TraceResult tr;		
+		g_Utility.TraceHull( start, start + g_testDirs[i], ignore_monsters, human_hull, plr.edict(), tr );
+		CBaseEntity@ pHit = g_EntityFuncs.Instance( tr.pHit );
+		
+		if (pHit !is null and (pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1)) {
+			println("IGNORE " + pHit.pev.classname);
+			state.lastMovingObjectContact = g_Engine.time;
+			return 0;
+		}
+	}
+	
+	if (is_near_teleport_destination(plr)) {
+		state.lastTeleport = g_Engine.time;
+		state.lastOrigin = plr.pev.origin;
+		return 0;
 	}
 	
 	// going up/down slopes makes velocity appear faster than it is
@@ -462,17 +585,13 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	if (state.lastSpeeds.size() > MOVEMENT_HISTORY_SIZE) {
 		state.lastSpeeds.removeAt(0);
 		state.lastExpectedSpeeds.removeAt(0);
+	} else if (state.lastSpeeds.size() < MOVEMENT_HISTORY_SIZE) {
+		return 0; // wait for buffer to fill
 	}
 	
 	float avgActual = 0;
 	float avgExpected = 0;
-	for (uint i = 0; i < state.lastSpeeds.size(); i++) {
-		if (state.lastSpeeds[i] > state.lastExpectedSpeeds[i]*50) {
-			// ignore super insane speed (teleport, most likely)
-			//println("IGNORE INSANE SPEED (teleport)");
-			continue;
-		}
-	
+	for (uint i = 0; i < state.lastSpeeds.size(); i++) {	
 		avgActual += state.lastSpeeds[i];
 		avgExpected += state.lastExpectedSpeeds[i];
 	}
@@ -484,24 +603,20 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	}
 	
 	float errorRatio = avgActual / avgExpected;
-	bool isSpeedWrong = avgActual > MOVEMENT_HACK_MIN
-			&& (avgActual > avgExpected*MOVEMENT_HACK_RATIO_FAST || avgActual < avgExpected*MOVEMENT_HACK_RATIO_SLOW);
+	bool movingTooFast = avgActual > MOVEMENT_HACK_MIN && avgActual > avgExpected*MOVEMENT_HACK_RATIO_FAST;
+	bool movingTooSlow = avgExpected > MOVEMENT_HACK_MIN && avgActual < avgExpected*MOVEMENT_HACK_RATIO_SLOW;
+	bool isSpeedWrong = movingTooFast || movingTooSlow;
+	
+	if (movingTooFast) {
+		println("TOO FAST " + (avgActual / avgExpected));
+	} else if (movingTooSlow) {
+		println("TOO SLOW " + (avgActual / avgExpected ));
+	}
 	
 	//println("ERROR RATIO: " + errorRatio);
 	
 	if (!isSpeedWrong) {
 		return 0;
-	}
-	
-	// being pushed by entities doesn't update velocity, so allow faster movement around moving ents
-	Vector start = plr.pev.origin;
-	for (uint i = 0; i < g_testDirs.size(); i++) {
-		TraceResult tr;		
-		g_Utility.TraceHull( start, start + g_testDirs[i], ignore_monsters, human_hull, plr.edict(), tr );
-		CBaseEntity@ pHit = g_EntityFuncs.Instance( tr.pHit );
-		if (pHit !is null and (pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1)) {
-			return 0;
-		}
 	}
 	
 	int sussyness = 1;
@@ -525,7 +640,6 @@ int getSecondaryAmmo(CBasePlayer@ plr, CBasePlayerWeapon@ wep) {
 	return wep.m_iSecondaryAmmoType > -1 ? plr.m_rgAmmo(wep.m_iSecondaryAmmoType) : 0;
 }
 
-// called after weapon shoot code
 HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	//if (!g_enabled) {
 	//	return HOOK_CONTINUE;
@@ -541,34 +655,33 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		state.replayHistory.removeAt(0);
 	}
 	
+	float timeSinceLastCheck = g_Engine.time - state.lastPacket;
+	state.lastPacket = g_Engine.time;
+	
+	if (state.waitHackCheck > g_Engine.time) {
+		state.wasWaiting = true;
+		return HOOK_CONTINUE;
+	}
+	
+	if (state.wasWaiting) {
+		println("Resume hax check");
+		state.wasWaiting = false;
+	}
+	
+	if (plr.m_afButtonPressed | plr.m_afButtonLast != 0) {
+		state.lastButtonPress = g_Engine.time;
+	}
+	
 	if (wep !is null) {
 		// primary fired
 		bool lessPrimaryAmmo = state.lastPrimaryAmmo > 0 && state.lastPrimaryAmmo > getPrimaryAmmo(plr, wep);
 		bool lessSecondaryAmmo = state.lastSecondaryAmmo > 0 && state.lastSecondaryAmmo > getSecondaryAmmo(plr, wep);
 		bool lessPrimaryClip = state.lastPrimaryClip > wep.m_iClip;
 		bool wasReload = wep.m_iClip > state.lastPrimaryClip;
-		float timeSinceLastCheck = g_Engine.time - state.lastPacket;
-		
-		if (timeSinceLastCheck > LAGOUT_TIME) {
-			// got disconnected for a moment
-			//println("DISCONNECTED FOR A MMOMENT " + timeSinceLastCheck);
-			state.waitHackCheck = g_Engine.time + LAGOUT_GRACE_PERIOD; // a huge batch of packets is probably coming. Ignore it.
-		}
 		
 		state.lastPrimaryClip = wep.m_iClip;
 		state.lastPrimaryAmmo = getPrimaryAmmo(plr, wep);
 		state.lastSecondaryAmmo = getSecondaryAmmo(plr, wep);
-		state.lastPacket = g_Engine.time;
-		
-		if (state.waitHackCheck > g_Engine.time) {
-			state.wasWaiting = true;
-			return HOOK_CONTINUE;
-		}
-		
-		if (state.wasWaiting) {
-			//println("Resume hax check");
-			state.wasWaiting = false;
-		}
 		
 		if (wep.entindex() != state.lastWepId) {
 			state.lastWepId = wep.entindex();
@@ -629,7 +742,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 
 
 CClientCommand _anticheat("anticheat", "AntiCheat", @anticheatToggle );
-CClientCommand _replay("replaycheat", "AntiCheat", @replayCheater );
+CClientCommand _replay("rpcheat", "AntiCheat", @replayCheater );
 
 void anticheatToggle( const CCommand@ args )
 {
@@ -696,6 +809,7 @@ void replayCheater( const CCommand@ args )
 	g_replay_ghost = ent;
 	
 	plr.pev.origin = frames[frames.size()-1].origin;
+	//plr.pev.origin = frames[0].origin;
 	
 	println("Start " + frames.size() + " replay from " + frames[0].time);
 	g_Scheduler.SetTimeout("debug_replay", 0.5f, g_replay_ghost, frames, g_Engine.time, frameOffset, speed, -1);
