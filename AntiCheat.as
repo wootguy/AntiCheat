@@ -1,5 +1,10 @@
+// False positives:
+// - poke646_elevator running into buttons
+// - stuck inside wedge?
+
 // TODO:
 // - pausing near pushing entities is overkill yet still triggers false positives
+// - less tolerant for 1.4x weapon speedup over long durations, maybe go down to 1.1x
 
 const float MOVEMENT_HACK_RATIO_FAST = 1.1f; // how much actual and expected movement speed can differ
 const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much actual and expected movement speed can differ
@@ -8,7 +13,7 @@ const int HACK_DETECTION_MAX = 20; // max number of detections before killing pl
 const int MAX_CMDS_PER_SECOND = 220; // max number of commands/sec before it's speedhacking (200 max FPS + some buffer)
 const float WEAPON_COOLDOWN_EPSILON = 0.05f; // allow this much error in cooldown time
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min amount for damage)
-const float MAX_WEAPON_SPEEDUP = 1.3f; // max allowed speedhack on weapons (too low might kill innocent players)
+const float MAX_WEAPON_SPEEDUP = 1.4f; // max allowed speedhack on weapons (too low might kill innocent players)
 const float WEAPON_ANALYZE_TIME = 1.5f; // minimum continous shooting time to detect hacking
 const float MIN_BULLET_DELAY = 0.05f; // little faster than the fastest shooting weapon
 const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
@@ -109,7 +114,6 @@ void init() {
 	g_speedhackPrimaryTime["weapon_sporelauncher"] = 0.6;
 	g_speedhackPrimaryTime["weapon_minigun"] = 0.06;
 	g_speedhackPrimaryTime["weapon_shockrifle"] = 0.08; // 0.22 for primary
-	g_speedhackPrimaryTime["weapon_medkit"] = 0.5; //
 	g_speedhackPrimaryTime["weapon_displacer"] = 2.0;
 	g_speedhackPrimaryTime["weapon_tripmine"] = 0.305;
 	g_speedhackPrimaryTime["weapon_snark"] = 0.305;
@@ -143,7 +147,6 @@ void init() {
 	g_weaponIds["weapon_sporelauncher"] = 15;
 	g_weaponIds["weapon_minigun"] = 16;
 	g_weaponIds["weapon_shockrifle"] = 17;
-	g_weaponIds["weapon_medkit"] = 18;
 	g_weaponIds["weapon_displacer"] = 19;
 	g_weaponIds["weapon_tripmine"] = 20;
 	g_weaponIds["weapon_snark"] = 21;
@@ -336,6 +339,10 @@ void detect_speedhack() {
 			continue;
 		}
 		
+		if (plr.pev.flags & FL_FROZEN != 0) {
+			continue; // players keep velocity on cutscenes that freeze players
+		}
+		
 		if (timeSinceLastPacket > LAGOUT_TIME) {
 			// got disconnected for a moment
 			println("DISCONNECTED FOR A MMOMENT " + timeSinceLastCheck);
@@ -457,6 +464,7 @@ void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, 
 					PlayerFrame@ frame = frames[k];
 					ghost.pev.origin = frame.origin;
 					ghost.pev.angles = frame.angles;
+					ghost.pev.angles.x = -ghost.pev.angles.x;
 			
 					if (lastFrame >= 0 and lastFrame < i) {
 						bool shotWeapon = frames[k-1].weaponAmmo > frames[k].weaponAmmo
@@ -470,7 +478,7 @@ void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, 
 					}
 					
 					int nextFrameTime = k < int(frames.size())-1 ? int((frames[k+1].time - frame.time)*1000) : -1;
-					println("Time: " + formatFloat(t, "", 6, 3)
+					println("Time: " + formatFloat(frame.time, "", 6, 3)
 							+ ", Frame " + formatInt(k, "", 3)
 							//+ ", FrameTime " + formatFloat(frame.time, "", 6, 3)
 							+ ", Speed: " + formatInt(int(frame.velocity.Length()), "", 4)
@@ -585,6 +593,18 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	float actualSpeed = originDiff.Length() * (1.0f / timeSinceLastCheck);
 	state.lastOrigin = plr.pev.origin;
 	
+	if (actualSpeed < expectedSpeed*MOVEMENT_HACK_RATIO_SLOW) {
+		// got stuck between two surfaces and is building velocity while not moving.
+		TraceResult tr;		
+		g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + plr.pev.velocity.Normalize(), dont_ignore_monsters, human_hull, plr.edict(), tr );
+		if (tr.flFraction < 1.0f) {
+			println("PROBABLY STUCK");
+			state.lastSpeeds.resize(0);
+			state.lastExpectedSpeeds.resize(0);
+			return 0;
+		}
+	}
+	
 	state.lastSpeeds.insertLast(actualSpeed);
 	state.lastExpectedSpeeds.insertLast(expectedSpeed);
 	
@@ -616,7 +636,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	if (movingTooFast) {
 		println("TOO FAST " + (avgActual / avgExpected));
 	} else if (movingTooSlow) {
-		println("TOO SLOW " + (avgActual / avgExpected ));
+		println("TOO SLOW " + (avgActual / avgExpected));
 	}
 	
 	//println("ERROR RATIO: " + errorRatio);
@@ -672,6 +692,10 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	if (state.wasWaiting) {
 		println("Resume hax check");
 		state.wasWaiting = false;
+		
+		// prevent false positives during lag spikes
+		state.lastPrimaryShootTimes.resize(0);
+		state.lastSecondaryShootTimes.resize(0);
 	}
 	
 	if (plr.m_afButtonPressed | plr.m_afButtonLast != 0) {
