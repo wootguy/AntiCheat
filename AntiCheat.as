@@ -377,7 +377,7 @@ void detect_speedhack() {
 		//println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ") " + timeSinceLastPacket);
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
-			kill_hacker(state, plr, "speedhacking");
+			kill_hacker(state, plr, "movement speedhack", "move");
 		}
 	}
 }
@@ -395,7 +395,7 @@ bool is_near_teleport_destination(CBasePlayer@ plr) {
 	return false;
 }
 
-void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
+void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason, string shortReason) {
 	if (g_mode == MODE_ENABLE) {
 		plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
 		float defaultRespawnDelay = g_EngineFuncs.CVarGetFloat("mp_respawndelay");
@@ -410,7 +410,7 @@ void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
 		g_Log.PrintF(msg);
 	}
 	
-	writeReplayData(state, plr);
+	writeReplayData(state, plr, shortReason);
 	
 	state.detections = 0;
 	state.lastSpeeds.resize(0);
@@ -420,12 +420,12 @@ void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason) {
 	state.replayHistory.resize(0);
 }
 
-void writeReplayData(SpeedState@ state, CBasePlayer@ plr) {
+void writeReplayData(SpeedState@ state, CBasePlayer@ plr, string reason) {
 
 	DateTime now = DateTime();
-	string timeStr = "" + now.GetYear() + "-" + formatInt(now.GetMonth()+1, "0", 2) + "_" + formatInt(now.GetDayOfMonth()+1, "0", 2) + "_" + 
+	string timeStr = "" + now.GetYear() + "-" + formatInt(now.GetMonth()+1, "0", 2) + "-" + formatInt(now.GetDayOfMonth()+1, "0", 2) + "_" + 
 					 formatInt(now.GetHour()+1, "0", 2) + "-" + formatInt(now.GetMinutes()+1, "0", 2) + "-" + formatInt(now.GetSeconds()+1, "0", 2);
-	string path = REPLAY_ROOT_PATH + timeStr + "__" + g_Engine.mapname + "__" + plr.pev.netname + ".txt";
+	string path = REPLAY_ROOT_PATH + timeStr + "_" + reason + "_" + g_Engine.mapname + "_" + plr.pev.netname + ".txt";
 	
 	File@ f = g_FileSystem.OpenFile(path, OpenFile::WRITE);
 	
@@ -518,7 +518,7 @@ void detect_jumpbug() {
 		bool preventedDamage = plr.pev.health == state.lastHealth and plr.pev.waterlevel == 0;
 		
 		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage)  {
-			kill_hacker(state, plr, "using the jumpbug cheat");
+			kill_hacker(state, plr, "using the jumpbug cheat", "jumpbug");
 		}
 		
 		state.lastVelocity = plr.pev.velocity;
@@ -526,6 +526,13 @@ void detect_jumpbug() {
 		
 		if (plr.pev.fixangle != 0) {
 			// must have been teleported
+			state.lastTeleport = g_Engine.time;
+		}
+		
+		CustomKeyvalues@ tCustom = plr.GetCustomKeyvalues();
+		CustomKeyvalue tValue( tCustom.GetKeyvalue( "$f_lastAntiBlock" ) );
+		float time = tValue.GetFloat();
+		if (time >= g_Engine.time) {
 			state.lastTeleport = g_Engine.time;
 		}
 	}
@@ -759,8 +766,11 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 				if (speedError > MAX_WEAPON_SPEEDUP) {
 					println("ZOMG HACKING");
 					
+					string wep_name = wep.pev.classname;
+					wep_name.Replace("weapon_", "");
+					
 					g_Log.PrintF("[AntiCheat] Speedhack on " + plr.pev.netname + " " +debugMsg + "\n");
-					kill_hacker(state, plr, "speedhacking");
+					kill_hacker(state, plr, wep_name + " speedhack", wep_name);
 				}
 			}			
 		}
