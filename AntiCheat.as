@@ -13,7 +13,7 @@ const int HACK_DETECTION_MAX = 20; // max number of detections before killing pl
 const int MAX_CMDS_PER_SECOND = 220; // max number of commands/sec before it's speedhacking (200 max FPS + some buffer)
 const float WEAPON_COOLDOWN_EPSILON = 0.05f; // allow this much error in cooldown time
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min amount for damage)
-const float MAX_WEAPON_SPEEDUP = 1.4f; // max allowed speedhack on weapons (too low might kill innocent players)
+const float MAX_WEAPON_SPEEDUP = 1.3f; // max allowed speedhack on weapons (too low might kill innocent players)
 const float WEAPON_ANALYZE_TIME = 1.5f; // minimum continous shooting time to detect hacking
 const float MIN_BULLET_DELAY = 0.05f; // little faster than the fastest shooting weapon
 const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
@@ -101,7 +101,7 @@ void init() {
 	g_speedhackPrimaryTime["weapon_eagle"] = 0.305;
 	g_speedhackPrimaryTime["weapon_uzi"] = 0.076;
 	g_speedhackPrimaryTime["weapon_357"] = 0.75;
-	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.104;
+	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.085; // actually 0.104 but sometimes it double fires
 	g_speedhackPrimaryTime["weapon_shotgun"] = 0.95;
 	g_speedhackPrimaryTime["weapon_crossbow"] = 1.55;
 	g_speedhackPrimaryTime["weapon_rpg"] = 2.0;
@@ -179,8 +179,12 @@ array<string> g_weapon_sounds = {
 	"weapons/displacer_fire.wav",
 	"weapons/mine_deploy.wav",
 	"squeek/sqk_hunt2.wav",
-	"weapons/m16_3round.wav"
+	"weapons/hks1.wav"
 };
+
+string vectorIntString(Vector v) {
+	return "" + int32(v.x) + "," + int32(v.y) + "," + int32(v.z);
+}
 
 class PlayerFrame {
 	float time;
@@ -238,7 +242,7 @@ class PlayerFrame {
 	}
 	
 	string toString() {
-		return "" + time + "_" + origin.ToString() + "_" + velocity.ToString() + "_" + angles.ToString() + "_" 
+		return "" + time + "_" + vectorIntString(origin) + "_" + vectorIntString(velocity) + "_" + vectorIntString(angles) + "_" 
 				  + buttons + "_" + health + "_" + weaponId + "_" + weaponClip + "_" + weaponAmmo + "_" + weaponAmmo2 + "_" + moveDetections;
 	}
 }
@@ -320,7 +324,7 @@ void detect_speedhack() {
 	for (int i = 1; i <= g_Engine.maxClients; i++) {
 		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
 		
-		if (plr is null or !plr.IsConnected() or !plr.IsAlive()) {
+		if (plr is null or !plr.IsConnected()) {
 			continue;
 		}
 		
@@ -331,17 +335,9 @@ void detect_speedhack() {
 		float timeSinceLastButton = g_Engine.time - state.lastButtonPress;
 		float timeSinceLastTeleport = g_Engine.time - state.lastTeleport;
 		bool isNoclipping = plr.pev.movetype == MOVETYPE_NOCLIP;
+		bool isAfk = timeSinceLastButton > AFK_TIME;
+		bool isFrozen = plr.pev.flags & FL_FROZEN != 0;
 		state.lastDetectTime = g_Engine.time;
-		
-		if (timeSinceLastButton > AFK_TIME) {
-			// prevent AFK ropes triggering speedhacks
-			//println("AFK IGNORE");
-			continue;
-		}
-		
-		if (plr.pev.flags & FL_FROZEN != 0) {
-			continue; // players keep velocity on cutscenes that freeze players
-		}
 		
 		if (timeSinceLastPacket > LAGOUT_TIME) {
 			// got disconnected for a moment
@@ -349,8 +345,11 @@ void detect_speedhack() {
 			state.waitHackCheck = g_Engine.time + LAGOUT_GRACE_PERIOD; // a huge batch of packets is probably coming. Ignore it.
 		}
 		
-		if (timeSinceLastPacket > LAGOUT_TIME or state.waitHackCheck > g_Engine.time) {
+		bool isLaggedOut = timeSinceLastPacket > LAGOUT_TIME or state.waitHackCheck > g_Engine.time;
+		
+		if (isAfk or isFrozen or isLaggedOut or !plr.IsAlive()) {
 			state.lastOrigin = plr.pev.origin;
+			state.detections -= 1;
 			//println("PAUSE (lag)");
 			continue;
 		}
@@ -462,6 +461,7 @@ void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, 
 			if (i != lastFrame) {
 				for (int k = lastFrame+1; k <= i; k++) {
 					PlayerFrame@ frame = frames[k];
+					float actualSpeed = (ghost.pev.origin - frame.origin).Length();
 					ghost.pev.origin = frame.origin;
 					ghost.pev.angles = frame.angles;
 					ghost.pev.angles.x = -ghost.pev.angles.x;
@@ -482,6 +482,8 @@ void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, 
 							+ ", Frame " + formatInt(k, "", 3)
 							//+ ", FrameTime " + formatFloat(frame.time, "", 6, 3)
 							+ ", Speed: " + formatInt(int(frame.velocity.Length()), "", 4)
+							//+ ", Speed: " + frame.velocity.Length()
+							//+ ", ActualSpeed: " + actualSpeed
 							+ ", Buttons: " + formatInt(frame.buttons, "", 5)
 							+ ", Weapon: " + formatInt(frame.weaponId, "", 2)
 							+ ", Ammo: " + formatInt(frame.weaponClip, "", 3) + " " + formatInt(frame.weaponAmmo, "", 3)
@@ -547,39 +549,15 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	Vector originDiff = plr.pev.origin - state.lastOrigin;
 	
 	Vector expectedVelocity = plr.pev.velocity + plr.pev.basevelocity;
-	if (plr.pev.FlagBitSet(FL_ONGROUND) && plr.pev.groundentity !is null) {
-		CBaseEntity@ pTrain = g_EntityFuncs.Instance( plr.pev.groundentity );
-		
-		if (pTrain is null or pTrain.pev.avelocity.Length() >= 1) {
-			state.lastOrigin = plr.pev.origin;
-			state.lastMovingObjectContact = g_Engine.time;
-			return 0; // too complicated to calculate where the player is expected to be
-		}
-		
-		expectedVelocity = expectedVelocity + pTrain.pev.velocity;
-	}
-	
-	{
-		// TODO: calculate inbetween conveyors (hl_c09 smasher section)
-		TraceResult tr;		
-		g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + Vector(0,0,-32), ignore_monsters, human_hull, plr.edict(), tr );
-		CBaseEntity@ pStand = g_EntityFuncs.Instance( tr.pHit );
-		
-		if (pStand !is null and pStand.pev.classname == "func_conveyor") {
-			state.lastOrigin = plr.pev.origin;
-			state.lastMovingObjectContact = g_Engine.time;
-			return 0; // ignore speedhack on conveyor
-		}
-	}
-	
-	// being pushed by entities doesn't update velocity, so allow faster movement around moving ents
+
+	// velocity/collision gets weird on and around moving objects, ignore those cases
 	Vector start = plr.pev.origin;
 	for (uint i = 0; i < g_testDirs.size(); i++) {
 		TraceResult tr;		
 		g_Utility.TraceHull( start, start + g_testDirs[i], ignore_monsters, human_hull, plr.edict(), tr );
 		CBaseEntity@ pHit = g_EntityFuncs.Instance( tr.pHit );
 		
-		if (pHit !is null and (pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1)) {
+		if (pHit !is null and (pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1 or pHit.pev.classname == "func_conveyor")) {
 			println("IGNORE " + pHit.pev.classname);
 			state.lastMovingObjectContact = g_Engine.time;
 			return 0;
@@ -599,12 +577,14 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	float expectedSpeed = (expectedVelocity).Length();
 	float actualSpeed = originDiff.Length() * (1.0f / timeSinceLastCheck);
 	state.lastOrigin = plr.pev.origin;
-	
+
 	if (actualSpeed < expectedSpeed*MOVEMENT_HACK_RATIO_SLOW) {
 		// got stuck between two surfaces and is building velocity while not moving.
-		TraceResult tr;		
-		g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + plr.pev.velocity.Normalize(), dont_ignore_monsters, human_hull, plr.edict(), tr );
-		if (tr.flFraction < 1.0f) {
+		
+		TraceResult tr;
+		HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
+		g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + plr.pev.velocity.Normalize()*8, dont_ignore_monsters, hullType, plr.edict(), tr );
+		if (tr.flFraction < 1.0f or tr.fStartSolid == 1) {
 			println("PROBABLY STUCK");
 			state.lastSpeeds.resize(0);
 			state.lastExpectedSpeeds.resize(0);
@@ -654,9 +634,9 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	
 	int sussyness = 1;
 	
-	if (errorRatio > 2 || errorRatio < 0.25f) {
+	if (errorRatio > 2) {
 		sussyness = 2;
-	} else if (errorRatio > 4 || errorRatio < 0.1f) {
+	} else if (errorRatio > 4) {
 		sussyness = 4;
 	}
 	
@@ -764,8 +744,6 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 				println(debugMsg);
 			
 				if (speedError > MAX_WEAPON_SPEEDUP) {
-					println("ZOMG HACKING");
-					
 					string wep_name = wep.pev.classname;
 					wep_name.Replace("weapon_", "");
 					
@@ -787,7 +765,10 @@ CClientCommand _replay("rpcheat", "AntiCheat", @replayCheater );
 void anticheatToggle( const CCommand@ args )
 {
 	CBasePlayer@ plr = g_ConCommandSystem.GetCurrentPlayer();
-	g_mode = Math.max(0, Math.min(MODE_OBSERVE, atoi(args[1])));
+	
+	if (args.ArgC() > 1) {
+		g_mode = Math.max(0, Math.min(MODE_OBSERVE, atoi(args[1])));
+	}
 	
 	string newMode = "Enabled.";
 	if (g_mode == MODE_DISABLE) {
