@@ -6,26 +6,43 @@
 // - pausing near pushing entities is overkill yet still triggers false positives
 // - less tolerant for 1.4x weapon speedup over long durations, maybe go down to 1.1x
 
-const float MOVEMENT_HACK_RATIO_FAST = 1.1f; // how much actual and expected movement speed can differ
-const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much actual and expected movement speed can differ
+enum MODE {
+	MODE_DISABLE, // disable all checks (for testing server lag)
+	MODE_ENABLE,  // kill speedhackers
+	MODE_OBSERVE  // detect cheats and write replay data but don't kill anyone
+}
+
+class IgnoreZone {
+	Vector mins;
+	Vector maxs;
+	
+	IgnoreZone() {}
+	
+	IgnoreZone(Vector mins, Vector maxs) {
+		this.mins = mins;
+		this.maxs = maxs;
+	}
+}
+
+const float MOVEMENT_HACK_RATIO_FAST = 1.1f; // how much faster actual speed can be than expected
+const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much slower actual speed can be than expected
 const float MOVEMENT_HACK_MIN = 96; // min movement speed before detecting speedhack (detection inaccurate at low values)
 const int HACK_DETECTION_MAX = 20; // max number of detections before killing player (expect some false positives)
-const int MAX_CMDS_PER_SECOND = 220; // max number of commands/sec before it's speedhacking (200 max FPS + some buffer)
-const float WEAPON_COOLDOWN_EPSILON = 0.05f; // allow this much error in cooldown time
-const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min amount for damage)
-const float MAX_WEAPON_SPEEDUP = 1.3f; // max allowed speedhack on weapons (too low might kill innocent players)
+const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min speed for damage)
+const float MAX_WEAPON_SPEEDUP = 1.3f; // how much faster actual weapon shoot speed than expected
 const float WEAPON_ANALYZE_TIME = 1.5f; // minimum continous shooting time to detect hacking
-const float MIN_BULLET_DELAY = 0.05f; // little faster than the fastest shooting weapon
+const float MIN_BULLET_DELAY = 0.05f; // a little faster than the fastest shooting weapon
 const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
-const int MOVEMENT_HISTORY_SIZE = 8; // bigger = better lag tolerance, but short speedhacks are undetected
+const int MOVEMENT_HISTORY_SIZE = 10; // bigger = better lag tolerance, but short speedhacks are undetected
 const float LAGOUT_TIME = 0.1f; // pause speedhack checks if there's a gap in player commands longer than this
-const float LAGOUT_GRACE_PERIOD = 0.1f; // time to pause speedhack checks after lag spike.
+const float LAGOUT_GRACE_PERIOD_MAX = 0.5f; // max time time to pause speedhack checks after lag spike.
 const int REPLAY_HISTORY_SIZE = 1024; // number of packets to remember per player, for debugging speedhack detections
 const string REPLAY_ROOT_PATH = "scripts/plugins/store/anticheat_replay/";
 const float AFK_TIME = 5.0f; // min time to not be pressing buttons before speedhack checks are disabled
 const float MOVING_OBJECT_PAUSE_TIME = 0.5f; // fix false postives when rubbing past or jumping off a moving platform
 const float TELEPORT_PAUSE = 0.1f; // fix false postives when teleporting
 const float TELEPORT_RADIUS = 128; // radius around teleport destinations to ignore speedhacks (should be big enough to allow 0.05 seconds of movement after teleporting)
+const float IGNORE_ZONE_DIST = 256; // speedhacks ignored within this distance from a trigger teleport zone (0.05s of movement)
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
@@ -39,12 +56,6 @@ array<SpeedState> g_speedStates(g_Engine.maxClients + 1);
 
 EHandle g_replay_ghost;
 
-enum MODE {
-	MODE_DISABLE, // disable all checks (for testing server lag)
-	MODE_ENABLE,  // kill speedhackers
-	MODE_OBSERVE  // detect cheats and write replay data but don't kill anyone
-}
-
 int g_mode = MODE_OBSERVE;
 bool g_loaded_enable_setting = false;
 bool g_debug_mode = false;
@@ -57,6 +68,34 @@ array<Vector> g_testDirs = {
 	Vector(0, 0, 8),
 	Vector(0, 0, -8)
 };
+
+// order should match weapon ids
+array<string> g_weapon_sounds = {
+	"weapons/pl_gun3.wav",
+	"weapons/desert_eagle_fire.wav",
+	"weapons/uzi/shoot1.wav",
+	"weapons/357_shot1.wav",
+	"weapons/hks1.wav",
+	"weapons/sbarrel1.wav",
+	"weapons/xbow_fire1.wav",
+	"weapons/rocketfire1.wav",
+	"weapons/gauss2.wav",
+	"agrunt/ag_fire1.wav",
+	"weapons/grenade_hit1.wav",
+	"weapons/g_bounce1.wav",
+	"weapons/sniper_fire.wav",
+	"weapons/saw_fire1.wav",
+	"weapons/splauncher_fire.wav",
+	"hassault/hw_shoot2.wav",
+	"weapons/shock_fire.wav",
+	"weapons/medshot4.wav",
+	"weapons/displacer_fire.wav",
+	"weapons/mine_deploy.wav",
+	"squeek/sqk_hunt2.wav",
+	"weapons/hks1.wav"
+};
+
+array<IgnoreZone> g_ignore_zones;
 
 void print(string text) { g_Game.AlertMessage( at_console, text); }
 void println(string text) { print(text + "\n"); }
@@ -117,7 +156,7 @@ void init() {
 	g_speedhackPrimaryTime["weapon_displacer"] = 2.0;
 	g_speedhackPrimaryTime["weapon_tripmine"] = 0.305;
 	g_speedhackPrimaryTime["weapon_snark"] = 0.305;
-	g_speedhackPrimaryTime["weapon_m16"] = 0.168;
+	g_speedhackPrimaryTime["weapon_m16"] = 0.15; // actually .168 but too sensitive to lag
 	
 	// melee weapons can't be speedhacked
 	
@@ -154,33 +193,9 @@ void init() {
 	
 	g_speedStates.resize(0);
 	g_speedStates.resize(g_Engine.maxClients + 1);
+	
+	find_relative_teleports();
 }
-
-// order should match weapon ids
-array<string> g_weapon_sounds = {
-	"weapons/pl_gun3.wav",
-	"weapons/desert_eagle_fire.wav",
-	"weapons/uzi/shoot1.wav",
-	"weapons/357_shot1.wav",
-	"weapons/hks1.wav",
-	"weapons/sbarrel1.wav",
-	"weapons/xbow_fire1.wav",
-	"weapons/rocketfire1.wav",
-	"weapons/gauss2.wav",
-	"agrunt/ag_fire1.wav",
-	"weapons/grenade_hit1.wav",
-	"weapons/g_bounce1.wav",
-	"weapons/sniper_fire.wav",
-	"weapons/saw_fire1.wav",
-	"weapons/splauncher_fire.wav",
-	"hassault/hw_shoot2.wav",
-	"weapons/shock_fire.wav",
-	"weapons/medshot4.wav",
-	"weapons/displacer_fire.wav",
-	"weapons/mine_deploy.wav",
-	"squeek/sqk_hunt2.wav",
-	"weapons/hks1.wav"
-};
 
 string vectorIntString(Vector v) {
 	return "" + int32(v.x) + "," + int32(v.y) + "," + int32(v.z);
@@ -339,17 +354,11 @@ void detect_speedhack() {
 		bool isFrozen = plr.pev.flags & FL_FROZEN != 0;
 		state.lastDetectTime = g_Engine.time;
 		
-		if (timeSinceLastPacket > LAGOUT_TIME) {
-			// got disconnected for a moment
-			println("DISCONNECTED FOR A MMOMENT " + timeSinceLastCheck);
-			state.waitHackCheck = g_Engine.time + LAGOUT_GRACE_PERIOD; // a huge batch of packets is probably coming. Ignore it.
-		}
-		
 		bool isLaggedOut = timeSinceLastPacket > LAGOUT_TIME or state.waitHackCheck > g_Engine.time;
 		
 		if (isAfk or isFrozen or isLaggedOut or !plr.IsAlive()) {
 			state.lastOrigin = plr.pev.origin;
-			state.detections -= 1;
+			state.detections = Math.max(0, state.detections-1);
 			//println("PAUSE (lag)");
 			continue;
 		}
@@ -381,15 +390,35 @@ void detect_speedhack() {
 	}
 }
 
-bool is_near_teleport_destination(CBasePlayer@ plr) {
+// no way to tell if a player entered a teleport that preserves angles,
+// so this will create boxes around them where speedhacks should be ignored
+void find_relative_teleports() {
+	g_ignore_zones.resize(0);
+	
+	Vector buffer(IGNORE_ZONE_DIST, IGNORE_ZONE_DIST, IGNORE_ZONE_DIST);
+	
 	CBaseEntity@ ent = null;
 	do {
-		@ent = g_EntityFuncs.FindEntityInSphere(ent, plr.pev.origin, TELEPORT_RADIUS, "info_teleport_destination", "classname"); 
-		if (ent !is null)
+		@ent = g_EntityFuncs.FindEntityByClassname(ent, "trigger_teleport"); 
+		if (ent !is null and ent.pev.spawnflags & (128 | 256) != 0) // relative or keep-angles flags
 		{
-			return true;
+			IgnoreZone zone = IgnoreZone(ent.pev.absmin - buffer, ent.pev.absmax + buffer);
+			//println("FOUND RELATIVE TELEPORT " + ent.pev.target + " " + (zone.maxs - zone.mins).ToString());
+			g_ignore_zones.insertLast(zone);
 		}
 	} while (ent !is null);
+}
+
+bool is_near_teleport_trigger(CBasePlayer@ plr) {
+	Vector pos = plr.pev.origin;
+	
+	for (uint i = 0; i < g_ignore_zones.size(); i++) {	
+		Vector min = g_ignore_zones[i].mins;
+		Vector max = g_ignore_zones[i].maxs;
+		if (pos.x > min.x and pos.y > min.y and pos.z > min.z and pos.x < max.x and pos.y < max.y and pos.z < max.z) {
+			return true;
+		}
+	}
 	
 	return false;
 }
@@ -454,6 +483,7 @@ void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, 
 	float t = (g_Engine.time - startTime)*speed;
 	if (t + frames[startFrame].time > frames[frames.size()-1].time + 1.0f*speed) { 
 		startTime = g_Engine.time;
+		println("Replay finished");
 	}
 	
 	for (int i = int(frames.size())-1; i >= startFrame; i--) {
@@ -471,7 +501,7 @@ void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, 
 											|| frames[k-1].weaponClip > frames[k].weaponClip;
 						if (shotWeapon) {
 							uint8 sndId = frame.weaponId-1;
-							if (sndId > 0 and sndId < g_weapon_sounds.size()) {
+							if (sndId >= 0 and sndId < g_weapon_sounds.size()) {
 								g_SoundSystem.PlaySound(ghost.edict(), CHAN_AUTO, g_weapon_sounds[sndId], 1.0f, 0.0f, 0, 100);
 							}
 						}
@@ -510,11 +540,18 @@ void detect_jumpbug() {
 	for (int i = 1; i <= g_Engine.maxClients; i++) {
 		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
 		
-		if (plr is null or !plr.IsConnected() or !plr.IsAlive()) {
+		if (plr is null or !plr.IsConnected()) {
 			continue;
 		}
 		
 		SpeedState@ state = g_speedStates[plr.entindex()];
+		
+		if (!plr.IsAlive()) {
+			state.lastVelocity = Vector(0,0,0);
+			state.lastHealth = 0;
+			continue;
+		}
+		
 		bool jumpedInstantlyAfterLanding = state.lastVelocity.z < -JUMPBUG_SPEED and plr.pev.velocity.z > 128;
 		bool perfectlyTimedJump = (plr.m_afButtonPressed | plr.m_afButtonReleased) & (IN_JUMP | IN_DUCK) != 0;
 		bool preventedDamage = plr.pev.health == state.lastHealth and plr.pev.waterlevel == 0;
@@ -547,24 +584,31 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	}
 
 	Vector originDiff = plr.pev.origin - state.lastOrigin;
-	
 	Vector expectedVelocity = plr.pev.velocity + plr.pev.basevelocity;
+	
+	HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
 
 	// velocity/collision gets weird on and around moving objects, ignore those cases
 	Vector start = plr.pev.origin;
 	for (uint i = 0; i < g_testDirs.size(); i++) {
 		TraceResult tr;		
-		g_Utility.TraceHull( start, start + g_testDirs[i], ignore_monsters, human_hull, plr.edict(), tr );
+		g_Utility.TraceHull( start, start + g_testDirs[i], dont_ignore_monsters, hullType, plr.edict(), tr );
 		CBaseEntity@ pHit = g_EntityFuncs.Instance( tr.pHit );
 		
-		if (pHit !is null and (pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1 or pHit.pev.classname == "func_conveyor")) {
+		if (pHit is null) {
+			continue;
+		}
+		
+		bool isMoving = pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1;
+		
+		if (isMoving or pHit.IsMonster() or pHit.pev.classname == "func_conveyor") {
 			println("IGNORE " + pHit.pev.classname);
 			state.lastMovingObjectContact = g_Engine.time;
 			return 0;
 		}
 	}
 	
-	if (is_near_teleport_destination(plr)) {
+	if (is_near_teleport_trigger(plr)) {
 		state.lastTeleport = g_Engine.time;
 		state.lastOrigin = plr.pev.origin;
 		return 0;
@@ -582,7 +626,6 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 		// got stuck between two surfaces and is building velocity while not moving.
 		
 		TraceResult tr;
-		HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
 		g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + plr.pev.velocity.Normalize()*8, dont_ignore_monsters, hullType, plr.edict(), tr );
 		if (tr.flFraction < 1.0f or tr.fStartSolid == 1) {
 			println("PROBABLY STUCK");
@@ -668,8 +711,16 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		state.replayHistory.removeAt(0);
 	}
 	
-	float timeSinceLastCheck = g_Engine.time - state.lastPacket;
-	state.lastPacket = g_Engine.time;
+	float timeSinceLastPacket = g_Engine.time - state.lastPacket;
+	
+	if (timeSinceLastPacket > LAGOUT_TIME) {
+		// got disconnected for a moment
+		float grace_period = Math.min(LAGOUT_GRACE_PERIOD_MAX, timeSinceLastPacket);
+		println("DISCONNECTED FOR A MMOMENT " + grace_period);
+		state.waitHackCheck = g_Engine.time + grace_period; // a huge batch of packets is probably coming. Ignore it.
+	}
+	
+	state.lastPacket = g_Engine.time;	
 	
 	if (state.waitHackCheck > g_Engine.time) {
 		state.wasWaiting = true;
@@ -683,6 +734,10 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		// prevent false positives during lag spikes
 		state.lastPrimaryShootTimes.resize(0);
 		state.lastSecondaryShootTimes.resize(0);
+		state.detections = 0;
+		state.lastOrigin = plr.pev.origin;
+		state.lastSpeeds.resize(0);
+		state.lastExpectedSpeeds.resize(0);
 	}
 	
 	if (plr.m_afButtonPressed | plr.m_afButtonLast != 0) {
@@ -714,6 +769,11 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		if ((lessPrimaryAmmo || lessPrimaryClip) && !wasReload && g_speedhackPrimaryTime.exists(wep.pev.classname)) {
 			g_speedhackPrimaryTime.get(wep.pev.classname, cooldown);
 			@bulletTimes = state.lastPrimaryShootTimes;
+			
+			// weapon loses ammo every frame when secondary used in water
+			if (wep.pev.classname == "weapon_shockrifle" and plr.pev.waterlevel != 0) {
+				@bulletTimes = null;
+			}
 		}
 		
 		// secondary fired?
