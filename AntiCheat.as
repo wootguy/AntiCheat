@@ -1,6 +1,6 @@
 // False positives:
-// - poke646_elevator running into buttons
-// - stuck inside wedge?
+// - stuck inside tentacle
+// - portal spawner teleports
 
 // TODO:
 // - pausing near pushing entities is overkill yet still triggers false positives
@@ -380,6 +380,10 @@ class SpeedState {
 	float lastMovingObjectContact = 0;
 	float lastTeleport = 0; // ignore speedhacks shortle after teleporting
 	float lastWaterLevel = 0;
+	float lastPrimaryCooldown = 0;
+	float lastSecondaryCooldown = 0;
+	float lastAttack = 0;
+	float lastWeaponAnim = 0;
 
 	array<float> lastSpeeds;
 	array<float> lastExpectedSpeeds;
@@ -766,12 +770,20 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		// primary fired
 		bool lessPrimaryAmmo = state.lastPrimaryAmmo > 0 && state.lastPrimaryAmmo > getPrimaryAmmo(plr, wep);
 		bool lessSecondaryAmmo = state.lastSecondaryAmmo > 0 && state.lastSecondaryAmmo > getSecondaryAmmo(plr, wep);
+		bool primaryCooldownChanged = wep.m_flNextPrimaryAttack > state.lastPrimaryCooldown
+									  or plr.m_flNextAttack > state.lastAttack // for gauss
+									  or plr.pev.weaponanim != state.lastWeaponAnim; // for displacer
+		bool secondaryCooldownChanged = wep.m_flNextSecondaryAttack > state.lastSecondaryCooldown;
 		bool lessPrimaryClip = state.lastPrimaryClip > wep.m_iClip;
 		bool wasReload = wep.m_iClip > state.lastPrimaryClip;
 		
 		state.lastPrimaryClip = wep.m_iClip;
 		state.lastPrimaryAmmo = getPrimaryAmmo(plr, wep);
 		state.lastSecondaryAmmo = getSecondaryAmmo(plr, wep);
+		state.lastPrimaryCooldown = wep.m_flNextPrimaryAttack;
+		state.lastSecondaryCooldown = wep.m_flNextSecondaryAttack;
+		state.lastAttack = plr.m_flNextAttack;
+		state.lastWeaponAnim = plr.pev.weaponanim;
 		
 		if (wep.entindex() != state.lastWepId) {
 			state.lastWepId = wep.entindex();
@@ -784,7 +796,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		array<float>@ bulletTimes = null;
 		
 		// primary fired?
-		if ((lessPrimaryAmmo || lessPrimaryClip) && !wasReload && g_speedhackPrimaryTime.exists(wep.pev.classname)) {
+		if ((lessPrimaryAmmo || lessPrimaryClip) && !wasReload && g_speedhackPrimaryTime.exists(wep.pev.classname) and (primaryCooldownChanged || lessPrimaryClip)) {
 			g_speedhackPrimaryTime.get(wep.pev.classname, cooldown);
 			@bulletTimes = state.lastPrimaryShootTimes;
 			
@@ -795,7 +807,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		}
 		
 		// secondary fired?
-		if (lessSecondaryAmmo && g_speedhackSecondaryTime.exists(wep.pev.classname)) {
+		if (lessSecondaryAmmo && g_speedhackSecondaryTime.exists(wep.pev.classname) && secondaryCooldownChanged) {
 			g_speedhackSecondaryTime.get(wep.pev.classname, cooldown);
 			@bulletTimes = state.lastSecondaryShootTimes;
 		}
@@ -807,10 +819,6 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 			}
 			
 			uint bulletsToAnalyze = int(Math.max(3, (WEAPON_ANALYZE_TIME / cooldown) + 0.5f));
-			
-			if (wep.pev.classname == "weapon_m16") {
-				bulletsToAnalyze = 7;
-			}
 			
 			if (bulletTimes.size() >= bulletsToAnalyze) {
 				float expectedDelta = (bulletsToAnalyze-1)*cooldown;
