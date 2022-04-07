@@ -5,6 +5,7 @@
 // TODO:
 // - pausing near pushing entities is overkill yet still triggers false positives
 // - less tolerant for 1.4x weapon speedup over long durations, maybe go down to 1.1x
+// - shock_rifle secondary speedhack ignored
 
 enum MODE {
 	MODE_DISABLE, // disable all checks (for testing server lag)
@@ -762,7 +763,7 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		state.lastExpectedSpeeds.resize(0);
 	}
 	
-	if (plr.m_afButtonPressed | plr.m_afButtonLast != 0) {
+	if (plr.m_afButtonPressed | plr.m_afButtonLast | plr.m_afButtonLast != 0) {
 		state.lastButtonPress = g_Engine.time;
 	}
 	
@@ -826,14 +827,14 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 				float actualDelta = g_Engine.time - firstBulletTime;
 				float speedError = actualDelta != 0 ? (expectedDelta / actualDelta) : 99999;
 				
-				string debugMsg = "" + wep.pev.classname + " Bullets: " + bulletsToAnalyze + ", Cooldown: " + cooldown + ", Error: " + speedError;
+				string debugMsg = "" + wep.pev.classname + " Bullets: " + bulletsToAnalyze + ", First: " + firstBulletTime + ", Last: " + g_Engine.time + ", Error: " + actualDelta + " / " + expectedDelta + " = " + speedError;
 				println(debugMsg);
 			
 				if (speedError > MAX_WEAPON_SPEEDUP) {
 					string wep_name = wep.pev.classname;
 					wep_name.Replace("weapon_", "");
 					
-					g_Log.PrintF("[AntiCheat] Speedhack on " + plr.pev.netname + " " +debugMsg + "\n");
+					g_Log.PrintF("[AntiCheat] Speedhack on " + plr.pev.netname + " " + debugMsg + "\n");
 					kill_hacker(state, plr, wep_name + " speedhack", wep_name);
 				}
 			}			
@@ -889,6 +890,23 @@ void writeReplayData(SpeedState@ state, CBasePlayer@ plr, string reason) {
 	for (uint i = 0; i < state.detectHistory.size(); i++) {
 		f.Write(state.detectHistory[i].toString() + "\n");
 	}
+	
+	f.Write("BEGIN_BULLET_DATA\n");
+	
+	for (uint i = 0; i < state.lastPrimaryShootTimes.size(); i++) {
+		f.Write("" + state.lastPrimaryShootTimes[i]);
+		if (int(i) < int(state.lastPrimaryShootTimes.size())-1) {
+			f.Write(",");
+		}
+	}
+	f.Write("\n");
+	for (uint i = 0; i < state.lastSecondaryShootTimes.size(); i++) {
+		f.Write("" + state.lastSecondaryShootTimes[i] + ",");
+		if (int(i) < int(state.lastSecondaryShootTimes.size()-1)) {
+			f.Write(",");
+		}
+	}
+	f.Write("\n");
 	
 	f.Close();
 	
@@ -1040,9 +1058,11 @@ void replayCheater( const CCommand@ args )
 		return;
 	}
 	
-	bool parsingMoveDetects = false;
+	int parseMode = 0;
 	array<PlayerFrame> frames;
 	array<MoveDetectFrame> detectFrames;
+	array<float> primaryBulletTimes;
+	array<float> secondaryBulletTimes;
 	
 	while (!file.EOFReached()) {
 		string line;
@@ -1053,11 +1073,28 @@ void replayCheater( const CCommand@ args )
 		}
 		
 		if (line == "BEGIN_MOVE_DETECT_REPLAY") {
-			parsingMoveDetects = true;
+			parseMode = 1;
 			continue;
 		}
+		if (line == "BEGIN_BULLET_DATA") {			
+			file.ReadLine(line);
+			
+			array<string> parts = line.Split(",");
+			for (uint i = 0; i < parts.size(); i++) {
+				primaryBulletTimes.insertLast(atof(parts[i]));
+			}
+			
+			file.ReadLine(line);
+			
+			parts = line.Split(",");
+			for (uint i = 0; i < parts.size(); i++) {
+				secondaryBulletTimes.insertLast(atof(parts[i]));
+			}
+			
+			break;
+		}
 		
-		if (parsingMoveDetects) {
+		if (parseMode == 1) {
 			detectFrames.insertLast(MoveDetectFrame(plr, line));
 		} else {
 			frames.insertLast(PlayerFrame(plr, line));
