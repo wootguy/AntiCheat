@@ -37,6 +37,7 @@ const int MOVEMENT_HISTORY_SIZE = 10; // bigger = better lag tolerance, but shor
 const float LAGOUT_TIME = 0.1f; // pause speedhack checks if there's a gap in player commands longer than this
 const float LAGOUT_GRACE_PERIOD_MAX = 0.5f; // max time time to pause speedhack checks after lag spike.
 const int REPLAY_HISTORY_SIZE = 1024; // number of packets to remember per player, for debugging speedhack detections
+const int MOVE_DETECT_HISTORY_SIZE = 100; // number of packets to remember per player, for debugging speedhack detections
 const string REPLAY_ROOT_PATH = "scripts/plugins/store/anticheat_replay/";
 const float AFK_TIME = 5.0f; // min time to not be pressing buttons before speedhack checks are disabled
 const float MOVING_OBJECT_PAUSE_TIME = 0.5f; // fix false postives when rubbing past or jumping off a moving platform
@@ -93,6 +94,18 @@ array<string> g_weapon_sounds = {
 	"weapons/mine_deploy.wav",
 	"squeek/sqk_hunt2.wav",
 	"weapons/hks1.wav"
+};
+
+array<string> early_out_reasons = {
+	"SPEEDHACK",
+	"AFK/Frozen/Lag/Dead",
+	"Object/Noclip/Teleport/Barnacle",
+	"Object",
+	"Teleport",
+	"Stuck",
+	"Buffer",
+	"Not moving",
+	"Normal"
 };
 
 array<IgnoreZone> g_ignore_zones;
@@ -262,6 +275,63 @@ class PlayerFrame {
 	}
 }
 
+class MoveDetectFrame {
+	float time;
+	Vector origin;
+	Vector velocity;
+	Vector angles;
+	float actualSpeed;
+	float expectedSpeed;
+	float avgActual;
+	float avgExpected;
+	int moveDetections; // number of movement hack detections
+	int sussyness;
+	int earlyOutReason;
+	
+	MoveDetectFrame() {}
+	
+	MoveDetectFrame(CBasePlayer@ plr, SpeedState@ state) {
+		this.time = g_Engine.time;
+		this.origin = plr.pev.origin;
+		this.velocity = plr.pev.velocity;
+		this.angles = plr.pev.v_angle;
+		this.moveDetections = state.detections;
+		
+		this.actualSpeed = -1;
+		this.expectedSpeed = -1;
+		this.avgActual = -1;
+		this.avgExpected = -1;
+		this.sussyness = 0;
+		this.earlyOutReason = 0;
+	}
+	
+	// load from file
+	MoveDetectFrame(CBasePlayer@ plr, string line) {
+		array<string> parts = line.Split("_");
+		if (parts.size() != 11) {
+			g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "[AntiCheat] Incompatible replay file.\n");
+			return;
+		}
+		
+		time = atof(parts[0]);
+		g_Utility.StringToVector(origin, parts[1], ",");
+		g_Utility.StringToVector(velocity, parts[2], ",");
+		g_Utility.StringToVector(angles, parts[3], ",");
+		actualSpeed = atoi(parts[4]);
+		expectedSpeed = atoi(parts[5]);
+		avgActual = atoi(parts[6]);
+		avgExpected = atoi(parts[7]);
+		moveDetections = atoi(parts[8]);
+		sussyness = atoi(parts[9]);
+		earlyOutReason = atoi(parts[10]);
+	}
+	
+	string toString() {
+		return "" + time + "_" + vectorIntString(origin) + "_" + vectorIntString(velocity) + "_" + vectorIntString(angles) + "_" 
+				  + actualSpeed + "_" + expectedSpeed + "_" + avgActual + "_" + avgExpected + "_" + moveDetections + "_" + sussyness + "_" + earlyOutReason;
+	}
+}
+
 class monster_ghost : ScriptBaseMonsterEntity
 {	
 	bool KeyValue( const string& in szKey, const string& in szValue )
@@ -316,6 +386,7 @@ class SpeedState {
 	array<float> lastPrimaryShootTimes;
 	array<float> lastSecondaryShootTimes;
 	array<PlayerFrame> replayHistory;
+	array<MoveDetectFrame> detectHistory;
 	
 	float lastPrimaryClip;
 	float lastPrimaryAmmo;
@@ -325,6 +396,13 @@ class SpeedState {
 	bool wasWaiting = false;
 	
 	SpeedState() {}
+	
+	void addDebugInfoFrame(MoveDetectFrame@ frame) {
+		detectHistory.insertLast(frame);
+		if (detectHistory.size() >= MOVE_DETECT_HISTORY_SIZE) {
+			detectHistory.removeAt(0);
+		}
+	}
 }
 
 uint32 getPlayerBit(CBaseEntity@ plr) {
@@ -345,6 +423,8 @@ void detect_speedhack() {
 		
 		SpeedState@ state = g_speedStates[plr.entindex()];
 		
+		MoveDetectFrame dinfo(plr, state);
+		
 		float timeSinceLastPacket = g_Engine.time - state.lastPacket;
 		float timeSinceLastCheck = g_Engine.time - state.lastDetectTime;
 		float timeSinceLastButton = g_Engine.time - state.lastButtonPress;
@@ -352,6 +432,7 @@ void detect_speedhack() {
 		bool isNoclipping = plr.pev.movetype == MOVETYPE_NOCLIP;
 		bool isAfk = timeSinceLastButton > AFK_TIME;
 		bool isFrozen = plr.pev.flags & FL_FROZEN != 0;
+		bool isBarnacled = plr.m_afPhysicsFlags & PFLAG_ONBARNACLE != 0;
 		state.lastDetectTime = g_Engine.time;
 		
 		bool isLaggedOut = timeSinceLastPacket > LAGOUT_TIME or state.waitHackCheck > g_Engine.time;
@@ -359,21 +440,32 @@ void detect_speedhack() {
 		if (isAfk or isFrozen or isLaggedOut or !plr.IsAlive()) {
 			state.lastOrigin = plr.pev.origin;
 			state.detections = Math.max(0, state.detections-1);
+			
+			dinfo.earlyOutReason = 1;
+			state.addDebugInfoFrame(dinfo);
+			
 			//println("PAUSE (lag)");
 			continue;
 		}
 		
-		int sussyMovement = detect_movement_speedhack(state, plr, timeSinceLastCheck);
+		int sussyMovement = detect_movement_speedhack(state, plr, dinfo, timeSinceLastCheck);
 		
 		float timeSinceLastMovingObjectTouch = g_Engine.time - state.lastMovingObjectContact;
-		if (timeSinceLastMovingObjectTouch < MOVING_OBJECT_PAUSE_TIME or isNoclipping or timeSinceLastTeleport < TELEPORT_PAUSE) {
+		if (timeSinceLastMovingObjectTouch < MOVING_OBJECT_PAUSE_TIME or isNoclipping or isBarnacled or timeSinceLastTeleport < TELEPORT_PAUSE) {
 			//println("PAUSE (Object/teleport)");
 			state.lastOrigin = plr.pev.origin;
 			state.lastSpeeds.resize(0);
 			state.lastExpectedSpeeds.resize(0);
 			state.detections = 0;
+			
+			if (dinfo.earlyOutReason == 0)
+				dinfo.earlyOutReason = 2;
+			state.addDebugInfoFrame(dinfo);
+			
 			continue;
 		}
+		
+		state.addDebugInfoFrame(dinfo);
 		
 		if (sussyMovement > 0) {
 			state.detections += sussyMovement;
@@ -448,90 +540,6 @@ void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason, string shor
 	state.replayHistory.resize(0);
 }
 
-void writeReplayData(SpeedState@ state, CBasePlayer@ plr, string reason) {
-
-	DateTime now = DateTime();
-	string timeStr = "" + now.GetYear() + "-" + formatInt(now.GetMonth()+1, "0", 2) + "-" + formatInt(now.GetDayOfMonth()+1, "0", 2) + "_" + 
-					 formatInt(now.GetHour()+1, "0", 2) + "-" + formatInt(now.GetMinutes()+1, "0", 2) + "-" + formatInt(now.GetSeconds()+1, "0", 2);
-	string path = REPLAY_ROOT_PATH + timeStr + "_" + reason + "_" + g_Engine.mapname + "_" + plr.pev.netname + ".txt";
-	
-	File@ f = g_FileSystem.OpenFile(path, OpenFile::WRITE);
-	
-	if (f is null or !f.IsOpen()) {
-		g_Log.PrintF("[AntiCheat] Failed to open replay file for writing: " + path + "\n");
-		return;
-	}
-	
-	for (uint i = 0; i < state.replayHistory.size(); i++) {
-		f.Write(state.replayHistory[i].toString() + "\n");
-	}
-	
-	f.Close();
-	
-	float duration = g_Engine.time - state.replayHistory[0].time;
-	
-	println("[AntiCheat] Wrote " + duration + "s replay file: " + path + "\n");
-}
-
-void debug_replay(EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, int startFrame, float speed, int lastFrame) {
-	CBaseEntity@ ghost = h_ghost;
-	
-	if (ghost is null) {
-		return;
-	}
-	
-	float t = (g_Engine.time - startTime)*speed;
-	if (t + frames[startFrame].time > frames[frames.size()-1].time + 1.0f*speed) { 
-		startTime = g_Engine.time;
-		println("Replay finished");
-	}
-	
-	for (int i = int(frames.size())-1; i >= startFrame; i--) {
-		if (t + frames[startFrame].time >= frames[i].time) {
-			if (i != lastFrame) {
-				for (int k = lastFrame+1; k <= i; k++) {
-					PlayerFrame@ frame = frames[k];
-					float actualSpeed = (ghost.pev.origin - frame.origin).Length();
-					ghost.pev.origin = frame.origin;
-					ghost.pev.angles = frame.angles;
-					ghost.pev.angles.x = -ghost.pev.angles.x;
-			
-					if (lastFrame >= 0 and lastFrame < i) {
-						bool shotWeapon = frames[k-1].weaponAmmo > frames[k].weaponAmmo
-											|| frames[k-1].weaponClip > frames[k].weaponClip;
-						if (shotWeapon) {
-							uint8 sndId = frame.weaponId-1;
-							if (sndId >= 0 and sndId < g_weapon_sounds.size()) {
-								g_SoundSystem.PlaySound(ghost.edict(), CHAN_AUTO, g_weapon_sounds[sndId], 1.0f, 0.0f, 0, 100);
-							}
-						}
-					}
-					
-					int nextFrameTime = k < int(frames.size())-1 ? int((frames[k+1].time - frame.time)*1000) : -1;
-					println("Time: " + formatFloat(frame.time, "", 6, 3)
-							+ ", Frame " + formatInt(k, "", 3)
-							//+ ", FrameTime " + formatFloat(frame.time, "", 6, 3)
-							+ ", Speed: " + formatInt(int(frame.velocity.Length()), "", 4)
-							//+ ", Speed: " + frame.velocity.Length()
-							//+ ", ActualSpeed: " + actualSpeed
-							+ ", Buttons: " + formatInt(frame.buttons, "", 5)
-							+ ", Weapon: " + formatInt(frame.weaponId, "", 2)
-							+ ", Ammo: " + formatInt(frame.weaponClip, "", 3) + " " + formatInt(frame.weaponAmmo, "", 3)
-							+ ", HP: " + formatInt(int(frame.health), "", 3)
-							+ ", detections: " + formatInt(frame.moveDetections, "", 2)
-							+ ", nextFrame: " + formatInt(nextFrameTime, "", 3) + "ms");
-				}
-			}
-			
-			lastFrame = i;
-			
-			break;
-		}
-	}
-	
-	g_Scheduler.SetTimeout("debug_replay", 0.0f, h_ghost, @frames, startTime, startFrame, speed, lastFrame);
-}
-
 void detect_jumpbug() {
 	if (g_mode == MODE_DISABLE) {
 		return;
@@ -578,11 +586,7 @@ void detect_jumpbug() {
 }
 
 // returns how extreme the speed difference in (1 = minor, 2+ major)
-int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSinceLastCheck) {
-	if (plr.pev.movetype == MOVETYPE_NOCLIP or plr.m_afPhysicsFlags & PFLAG_ONBARNACLE != 0) {
-		return 0;
-	}
-
+int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFrame@ dinfo, float timeSinceLastCheck) {
 	Vector originDiff = plr.pev.origin - state.lastOrigin;
 	Vector expectedVelocity = plr.pev.velocity + plr.pev.basevelocity;
 	
@@ -604,6 +608,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 		if (isMoving or pHit.IsMonster() or pHit.pev.classname == "func_conveyor") {
 			println("IGNORE " + pHit.pev.classname);
 			state.lastMovingObjectContact = g_Engine.time;
+			dinfo.earlyOutReason = 3;
 			return 0;
 		}
 	}
@@ -611,6 +616,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	if (is_near_teleport_trigger(plr)) {
 		state.lastTeleport = g_Engine.time;
 		state.lastOrigin = plr.pev.origin;
+		dinfo.earlyOutReason = 4;
 		return 0;
 	}
 	
@@ -621,6 +627,9 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	float expectedSpeed = (expectedVelocity).Length();
 	float actualSpeed = originDiff.Length() * (1.0f / timeSinceLastCheck);
 	state.lastOrigin = plr.pev.origin;
+	
+	dinfo.actualSpeed = actualSpeed;
+	dinfo.expectedSpeed = expectedSpeed;
 
 	if (actualSpeed < expectedSpeed*MOVEMENT_HACK_RATIO_SLOW) {
 		// got stuck between two surfaces and is building velocity while not moving.
@@ -631,6 +640,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 			println("PROBABLY STUCK");
 			state.lastSpeeds.resize(0);
 			state.lastExpectedSpeeds.resize(0);
+			dinfo.earlyOutReason = 5;
 			return 0;
 		}
 	}
@@ -642,6 +652,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 		state.lastSpeeds.removeAt(0);
 		state.lastExpectedSpeeds.removeAt(0);
 	} else if (state.lastSpeeds.size() < MOVEMENT_HISTORY_SIZE) {
+		dinfo.earlyOutReason = 6;
 		return 0; // wait for buffer to fill
 	}
 	
@@ -654,7 +665,11 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	avgActual /= float(state.lastSpeeds.size());
 	avgExpected /= float(state.lastSpeeds.size());
 	
+	dinfo.avgActual = avgActual;
+	dinfo.avgExpected = avgExpected;	
+	
 	if (avgExpected == 0) {
+		dinfo.earlyOutReason = 7;
 		return 0;
 	}
 	
@@ -672,6 +687,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	//println("ERROR RATIO: " + errorRatio);
 	
 	if (!isSpeedWrong) {
+		dinfo.earlyOutReason = 8;
 		return 0;
 	}
 	
@@ -682,6 +698,8 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, float timeSin
 	} else if (errorRatio > 4) {
 		sussyness = 4;
 	}
+	
+	dinfo.sussyness = sussyness;
 	
 	return sussyness;
 }
@@ -840,13 +858,164 @@ void anticheatToggle( const CCommand@ args )
 	g_PlayerFuncs.SayText(plr, "[AntiCheat] " + newMode + "\n");
 }
 
+void writeReplayData(SpeedState@ state, CBasePlayer@ plr, string reason) {
+
+	DateTime now = DateTime();
+	string timeStr = "" + now.GetYear() + "-" + formatInt(now.GetMonth()+1, "0", 2) + "-" + formatInt(now.GetDayOfMonth()+1, "0", 2) + "_" + 
+					 formatInt(now.GetHour()+1, "0", 2) + "-" + formatInt(now.GetMinutes()+1, "0", 2) + "-" + formatInt(now.GetSeconds()+1, "0", 2);
+	string path = REPLAY_ROOT_PATH + timeStr + "_" + reason + "_" + g_Engine.mapname + "_" + plr.pev.netname + ".txt";
+	
+	File@ f = g_FileSystem.OpenFile(path, OpenFile::WRITE);
+	
+	if (f is null or !f.IsOpen()) {
+		g_Log.PrintF("[AntiCheat] Failed to open replay file for writing: " + path + "\n");
+		return;
+	}
+	
+	for (uint i = 0; i < state.replayHistory.size(); i++) {
+		f.Write(state.replayHistory[i].toString() + "\n");
+	}
+	
+	f.Write("BEGIN_MOVE_DETECT_REPLAY\n");
+	
+	for (uint i = 0; i < state.detectHistory.size(); i++) {
+		f.Write(state.detectHistory[i].toString() + "\n");
+	}
+	
+	f.Close();
+	
+	float duration = g_Engine.time - state.replayHistory[0].time;
+	
+	println("[AntiCheat] Wrote " + duration + "s replay file: " + path + "\n");
+}
+
+void debug_replay(EHandle h_watcher, EHandle h_ghost, array<PlayerFrame>@ frames, float startTime, int startFrame, float speed, int lastFrame) {
+	CBaseEntity@ ghost = h_ghost;
+	
+	if (ghost is null) {
+		return;
+	}
+	
+	float t = (g_Engine.time - startTime)*speed;
+	if (t + frames[startFrame].time > frames[frames.size()-1].time + 1.0f*speed) { 
+		startTime = g_Engine.time;
+		println("Replay finished");
+	}
+	
+	for (int i = int(frames.size())-1; i >= startFrame; i--) {
+		if (t + frames[startFrame].time >= frames[i].time) {
+			if (i != lastFrame) {
+				for (int k = lastFrame+1; k <= i; k++) {
+					PlayerFrame@ frame = frames[k];
+					
+					ghost.pev.origin = frame.origin;
+					ghost.pev.angles = frame.angles;
+					ghost.pev.angles.x = -ghost.pev.angles.x;
+			
+					if (lastFrame >= 0 and lastFrame < i) {
+						bool shotWeapon = frames[k-1].weaponAmmo > frames[k].weaponAmmo
+											|| frames[k-1].weaponClip > frames[k].weaponClip;
+						if (shotWeapon) {
+							uint8 sndId = frame.weaponId-1;
+							if (sndId >= 0 and sndId < g_weapon_sounds.size()) {
+								g_SoundSystem.PlaySound(ghost.edict(), CHAN_AUTO, g_weapon_sounds[sndId], 1.0f, 0.0f, 0, 100);
+							}
+						}
+					}
+					
+					int nextFrameTime = k < int(frames.size())-1 ? int((frames[k+1].time - frame.time)*1000) : -1;
+					println("Time: " + formatFloat(frame.time, "", 6, 3)
+							+ ", Frame " + formatInt(k, "", 3)
+							+ ", Speed: " + formatInt(int(frame.velocity.Length()), "", 4)
+							+ ", Buttons: " + formatInt(frame.buttons, "", 5)
+							+ ", Weapon: " + formatInt(frame.weaponId, "", 2)
+							+ ", Ammo: " + formatInt(frame.weaponClip, "", 3) + " " + formatInt(frame.weaponAmmo, "", 3)
+							+ ", HP: " + formatInt(int(frame.health), "", 3)
+							+ ", detections: " + formatInt(frame.moveDetections, "", 2)
+							+ ", nextFrame: " + formatInt(nextFrameTime, "", 3) + "ms");
+					
+					CBaseEntity@ watcher = h_watcher;
+				}
+			}
+			
+			lastFrame = i;
+			
+			break;
+		}
+	}
+	
+	g_Scheduler.SetTimeout("debug_replay", 0.0f, h_watcher, h_ghost, @frames, startTime, startFrame, speed, lastFrame);
+}
+
+void debug_detect_replay(EHandle h_watcher, EHandle h_ghost, array<MoveDetectFrame>@ frames, float startTime, int startFrame, float speed, int lastFrame) {
+	CBaseEntity@ ghost = h_ghost;
+	
+	if (ghost is null) {
+		return;
+	}
+	
+	float t = (g_Engine.time - startTime)*speed;
+	if (t + frames[startFrame].time > frames[frames.size()-1].time + 1.0f*speed) { 
+		startTime = g_Engine.time;
+		println("Replay finished");
+	}
+	
+	for (int i = int(frames.size())-1; i >= startFrame; i--) {
+		if (t + frames[startFrame].time >= frames[i].time) {
+			if (i != lastFrame) {
+				for (int k = lastFrame+1; k <= i; k++) {
+					MoveDetectFrame@ frame = frames[k];
+					
+					ghost.pev.origin = frame.origin;
+					ghost.pev.angles = frame.angles;
+					ghost.pev.angles.x = -ghost.pev.angles.x;
+					
+					float error = 0;
+					if (frame.expectedSpeed != 0) {
+						error = frame.actualSpeed / frame.expectedSpeed;
+					}
+					
+					float avgError = 0;
+					if (frame.avgExpected != 0) {
+						avgError = frame.avgActual / frame.avgExpected;
+					}
+					
+					string earlyOut = frame.earlyOutReason >= 0 and frame.earlyOutReason < int(early_out_reasons.size()) ? early_out_reasons[frame.earlyOutReason] : ("" + frame.earlyOutReason);
+					
+					if (frame.sussyness > 0) {
+						earlyOut += " (+" + frame.sussyness + ")";
+					}
+					
+					int nextFrameTime = k < int(frames.size())-1 ? int((frames[k+1].time - frame.time)*1000) : -1;
+					println("Frame " + formatInt(k, "", 3)
+							+ ", Speeds: " + formatInt(int(frame.actualSpeed), "", 4) + " / " + formatInt(int(frame.expectedSpeed), "", 4) + " = " + formatFloat(error, "", 6, 2)
+							+ ", AvgSpeeds: " + formatInt(int(frame.avgActual), "", 4) + " / " + formatInt(int(frame.avgExpected), "", 4) + " = " + formatFloat(avgError, "", 6, 2)
+							+ ", detections: " + formatInt(frame.moveDetections, "", 2) 
+							+ ", nextFrame: " + formatInt(nextFrameTime, "", 3) + "ms"
+							+ ", Status: " + earlyOut);
+							
+					
+					CBaseEntity@ watcher = h_watcher;
+				}
+			}
+			
+			lastFrame = i;
+			
+			break;
+		}
+	}
+	
+	g_Scheduler.SetTimeout("debug_detect_replay", 0.0f, h_watcher, h_ghost, @frames, startTime, startFrame, speed, lastFrame);
+}
+
 void replayCheater( const CCommand@ args )
 {
 	CBasePlayer@ plr = g_ConCommandSystem.GetCurrentPlayer();
 	
 	string path = REPLAY_ROOT_PATH + args[1];
-	int frameOffset = atoi(args[2]);
-	float speed = atof(args[3]);
+	bool replayDetects = atoi(args[2]) != 0;
+	int frameOffset = atoi(args[3]);
+	float speed = atof(args[4]);
 	if (speed == 0)
 		speed = 1;
 		
@@ -863,7 +1032,9 @@ void replayCheater( const CCommand@ args )
 		return;
 	}
 	
+	bool parsingMoveDetects = false;
 	array<PlayerFrame> frames;
+	array<MoveDetectFrame> detectFrames;
 	
 	while (!file.EOFReached()) {
 		string line;
@@ -873,7 +1044,16 @@ void replayCheater( const CCommand@ args )
 			continue;
 		}
 		
-		frames.insertLast(PlayerFrame(plr, line));
+		if (line == "BEGIN_MOVE_DETECT_REPLAY") {
+			parsingMoveDetects = true;
+			continue;
+		}
+		
+		if (parsingMoveDetects) {
+			detectFrames.insertLast(MoveDetectFrame(plr, line));
+		} else {
+			frames.insertLast(PlayerFrame(plr, line));
+		}
 	}
 	
 	file.Close();	
@@ -900,5 +1080,9 @@ void replayCheater( const CCommand@ args )
 	//plr.pev.origin = frames[0].origin;
 	
 	println("Start " + frames.size() + " replay from " + frames[0].time);
-	g_Scheduler.SetTimeout("debug_replay", 0.5f, g_replay_ghost, frames, g_Engine.time, frameOffset, speed, -1);
+	
+	if (replayDetects)
+		g_Scheduler.SetTimeout("debug_detect_replay", 0.5f, EHandle(plr), g_replay_ghost, detectFrames, g_Engine.time, frameOffset, speed, -1);
+	else
+		g_Scheduler.SetTimeout("debug_replay", 0.5f, EHandle(plr), g_replay_ghost, frames, g_Engine.time, frameOffset, speed, -1);
 }
