@@ -99,14 +99,15 @@ array<string> g_weapon_sounds = {
 
 array<string> early_out_reasons = {
 	"SPEEDHACK",
-	"AFK/Frozen/Lag/Dead",
+	"AFK/Frozen/Dead",
 	"Object/Noclip/Teleport/Barnacle",
 	"Object",
 	"Teleport",
 	"Stuck",
 	"Buffer",
 	"Not moving",
-	"Normal"
+	"Normal",
+	"Lag"
 };
 
 array<IgnoreZone> g_ignore_zones;
@@ -154,7 +155,7 @@ void init() {
 	g_speedhackPrimaryTime["weapon_eagle"] = 0.305;
 	g_speedhackPrimaryTime["weapon_uzi"] = 0.076;
 	g_speedhackPrimaryTime["weapon_357"] = 0.75;
-	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.085; // actually 0.104 but sometimes it double fires
+	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.080; // actually 0.104 but sometimes it double fires
 	g_speedhackPrimaryTime["weapon_shotgun"] = 0.95;
 	g_speedhackPrimaryTime["weapon_crossbow"] = 1.55;
 	g_speedhackPrimaryTime["weapon_rpg"] = 2.0;
@@ -288,6 +289,7 @@ class MoveDetectFrame {
 	int moveDetections; // number of movement hack detections
 	int sussyness;
 	int earlyOutReason;
+	float timeSincePacket;
 	
 	MoveDetectFrame() {}
 	
@@ -297,6 +299,7 @@ class MoveDetectFrame {
 		this.velocity = plr.pev.velocity;
 		this.angles = plr.pev.v_angle;
 		this.moveDetections = state.detections;
+		this.timeSincePacket = g_Engine.time - state.lastPacket;
 		
 		this.actualSpeed = -1;
 		this.expectedSpeed = -1;
@@ -325,11 +328,12 @@ class MoveDetectFrame {
 		moveDetections = atoi(parts[8]);
 		sussyness = atoi(parts[9]);
 		earlyOutReason = atoi(parts[10]);
+		timeSincePacket = atoi(parts[11]);
 	}
 	
 	string toString() {
 		return "" + time + "_" + vectorIntString(origin) + "_" + vectorIntString(velocity) + "_" + vectorIntString(angles) + "_" 
-				  + actualSpeed + "_" + expectedSpeed + "_" + avgActual + "_" + avgExpected + "_" + moveDetections + "_" + sussyness + "_" + earlyOutReason;
+				  + actualSpeed + "_" + expectedSpeed + "_" + avgActual + "_" + avgExpected + "_" + moveDetections + "_" + sussyness + "_" + earlyOutReason + "_" + timeSincePacket;
 	}
 }
 
@@ -442,7 +446,7 @@ void detect_speedhack() {
 		
 		bool isLaggedOut = timeSinceLastPacket > LAGOUT_TIME or state.waitHackCheck > g_Engine.time;
 		
-		if (isAfk or isFrozen or isLaggedOut or !plr.IsAlive()) {
+		if (isAfk or isFrozen or !plr.IsAlive()) {
 			state.lastOrigin = plr.pev.origin;
 			state.detections = Math.max(0, state.detections-1);
 			
@@ -456,15 +460,14 @@ void detect_speedhack() {
 		int sussyMovement = detect_movement_speedhack(state, plr, dinfo, timeSinceLastCheck);
 		
 		float timeSinceLastMovingObjectTouch = g_Engine.time - state.lastMovingObjectContact;
-		if (timeSinceLastMovingObjectTouch < MOVING_OBJECT_PAUSE_TIME or isNoclipping or isBarnacled or timeSinceLastTeleport < TELEPORT_PAUSE) {
+		if (timeSinceLastMovingObjectTouch < MOVING_OBJECT_PAUSE_TIME or isLaggedOut or isNoclipping or isBarnacled or timeSinceLastTeleport < TELEPORT_PAUSE) {
 			//println("PAUSE (Object/teleport)");
-			state.lastOrigin = plr.pev.origin;
 			state.lastSpeeds.resize(0);
 			state.lastExpectedSpeeds.resize(0);
 			state.detections = 0;
 			
 			if (dinfo.earlyOutReason == 0)
-				dinfo.earlyOutReason = 2;
+				dinfo.earlyOutReason = isLaggedOut ? 9 : 2;
 			state.addDebugInfoFrame(dinfo);
 			
 			continue;
@@ -570,7 +573,14 @@ void detect_jumpbug() {
 		bool preventedDamage = plr.pev.health == state.lastHealth and plr.pev.waterlevel == 0;
 		
 		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage)  {
-			kill_hacker(state, plr, "using the jumpbug cheat", "jumpbug");
+			TraceResult tr;
+			HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
+			g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + Vector(0, 0, -16), dont_ignore_monsters, hullType, plr.edict(), tr );
+			
+			// touching or slightly above ground?
+			if (tr.flFraction < 1.0f) {
+				kill_hacker(state, plr, "using the jumpbug cheat", "jumpbug");
+			}			
 		}
 		
 		state.lastVelocity = plr.pev.velocity;
@@ -761,9 +771,19 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		state.lastOrigin = plr.pev.origin;
 		state.lastSpeeds.resize(0);
 		state.lastExpectedSpeeds.resize(0);
+		
+		if (wep !is null) {
+			state.lastPrimaryClip = wep.m_iClip;
+			state.lastPrimaryAmmo = getPrimaryAmmo(plr, wep);
+			state.lastSecondaryAmmo = getSecondaryAmmo(plr, wep);
+			state.lastPrimaryCooldown = wep.m_flNextPrimaryAttack;
+			state.lastSecondaryCooldown = wep.m_flNextSecondaryAttack;
+			state.lastAttack = plr.m_flNextAttack;
+			state.lastWeaponAnim = plr.pev.weaponanim;
+		}
 	}
 	
-	if (plr.m_afButtonPressed | plr.m_afButtonLast | plr.m_afButtonLast != 0) {
+	if (plr.m_afButtonPressed | plr.m_afButtonLast | plr.m_afButtonReleased != 0) {
 		state.lastButtonPress = g_Engine.time;
 	}
 	
@@ -1117,6 +1137,11 @@ void replayCheater( const CCommand@ args )
 	ent.pev.movetype = MOVETYPE_FLY;
 	ent.pev.takedamage = 0;
 	ent.pev.flags |= EF_NOINTERP;
+	
+	ent.pev.controller[0] = 127;
+	ent.pev.controller[1] = 127;
+	ent.pev.controller[2] = 127;
+	ent.pev.controller[3] = 127;
 	
 	g_EntityFuncs.Remove(g_replay_ghost);
 	g_replay_ghost = ent;
