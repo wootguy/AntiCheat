@@ -1,6 +1,7 @@
 // False positives:
 // - stuck inside tentacle
 // - portal spawner teleports
+// - fm_fun slowing down on big slope while strafing into wall
 
 // TODO:
 // - pausing near pushing entities is overkill yet still triggers false positives
@@ -119,6 +120,11 @@ array<string> early_out_reasons = {
 
 array<IgnoreZone> g_ignore_zones;
 
+CClientCommand _anticheat("anticheat", "AntiCheat", @anticheatToggle, ConCommandFlag::AdminOnly );
+CClientCommand _replay("rpcheat", "AntiCheat", @replayCheater, ConCommandFlag::AdminOnly );
+
+CConCommand@ cmdAnticheat;
+
 void print(string text) { g_Game.AlertMessage( at_console, text); }
 void println(string text) { print(text + "\n"); }
 
@@ -133,6 +139,8 @@ void PluginInit() {
 	
 	@g_enable = CCVar("enable", 1, "Toggle anticheat", ConCommandFlag::AdminOnly);
 	@g_killPenalty = CCVar("kill_penalty", 6, "respawn delay for killed speedhackers", ConCommandFlag::AdminOnly);
+	
+	@cmdAnticheat = @CConCommand( "mode", "Set anticheat mode", @anticheatToggle );
 	
 	init();
 }
@@ -323,7 +331,7 @@ class MoveDetectFrame {
 	// load from file
 	MoveDetectFrame(CBasePlayer@ plr, string line) {
 		array<string> parts = line.Split("_");
-		if (parts.size() != 12) {
+		if (parts.size() != 13) {
 			g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "[AntiCheat] Incompatible replay file.\n");
 			return;
 		}
@@ -932,16 +940,14 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 	return HOOK_CONTINUE;
 }
 
-
-CClientCommand _anticheat("anticheat", "AntiCheat", @anticheatToggle );
-CClientCommand _replay("rpcheat", "AntiCheat", @replayCheater );
-
 void anticheatToggle( const CCommand@ args )
 {
 	CBasePlayer@ plr = g_ConCommandSystem.GetCurrentPlayer();
 	
+	bool newModeSet = false;
 	if (args.ArgC() > 1) {
 		g_mode = Math.max(0, Math.min(MODE_OBSERVE, atoi(args[1])));
+		newModeSet = true;
 	}
 	
 	string newMode = "Enabled.";
@@ -952,6 +958,12 @@ void anticheatToggle( const CCommand@ args )
 	}
 	
 	g_PlayerFuncs.SayText(plr, "[AntiCheat] " + newMode + "\n");
+	g_EngineFuncs.ServerPrint("[AntiCheat] " + newMode + "\n");
+	
+	if (newModeSet) {
+		string user = plr !is null ? "-" + string(plr.pev.netname) : "";
+		g_Log.PrintF("[AntiCheat] " + newMode + "\n");
+	}
 }
 
 void writeReplayData(SpeedState@ state, CBasePlayer@ plr, string reason) {
@@ -994,6 +1006,8 @@ void writeReplayData(SpeedState@ state, CBasePlayer@ plr, string reason) {
 		}
 	}
 	f.Write("\n");
+	
+	f.Write("STEAM_ID: " + g_EngineFuncs.GetPlayerAuthId( plr.edict() ) + "\n");
 	
 	f.Close();
 	
@@ -1178,6 +1192,9 @@ void replayCheater( const CCommand@ args )
 				secondaryBulletTimes.insertLast(atof(parts[i]));
 			}
 			
+			break;
+		}
+		if (line.Find("STEAM") == 0) {
 			break;
 		}
 		
