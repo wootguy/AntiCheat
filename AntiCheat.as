@@ -25,17 +25,17 @@ class IgnoreZone {
 	}
 }
 
-const float MOVEMENT_HACK_RATIO_FAST = 1.1f; // how much faster actual speed can be than expected
+const float MOVEMENT_HACK_RATIO_FAST = 1.2f; // how much faster actual speed can be than expected
 const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much slower actual speed can be than expected
 const float MOVEMENT_HACK_MIN = 96; // min movement speed before detecting speedhack (detection inaccurate at low values)
 const int HACK_DETECTION_MAX = 20; // max number of detections before killing player (expect some false positives)
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min speed for damage)
-const float MAX_WEAPON_SPEEDUP = 1.3f; // how much faster actual weapon shoot speed than expected
+const float MAX_WEAPON_SPEEDUP = 1.2f; // how much faster actual weapon shoot speed than expected
 const float WEAPON_ANALYZE_TIME = 1.5f; // minimum continous shooting time to detect hacking
 const float MIN_BULLET_DELAY = 0.05f; // a little faster than the fastest shooting weapon
 const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
 const int MOVEMENT_HISTORY_SIZE = 10; // bigger = better lag tolerance, but short speedhacks are undetected
-const float LAGOUT_TIME = 0.1f; // pause speedhack checks if there's a gap in player commands longer than this
+const float LAGOUT_TIME = 0.0667f; // pause speedhack checks if there's a gap in player commands longer than this (15fps)
 const float LAGOUT_GRACE_PERIOD_MAX = 0.5f; // max time time to pause speedhack checks after lag spike.
 const int REPLAY_HISTORY_SIZE = 1024; // number of packets to remember per player, for debugging speedhack detections
 const int MOVE_DETECT_HISTORY_SIZE = 100; // number of packets to remember per player, for debugging speedhack detections
@@ -45,6 +45,8 @@ const float MOVING_OBJECT_PAUSE_TIME = 0.5f; // fix false postives when rubbing 
 const float TELEPORT_PAUSE = 0.1f; // fix false postives when teleporting
 const float TELEPORT_RADIUS = 128; // radius around teleport destinations to ignore speedhacks (should be big enough to allow 0.05 seconds of movement after teleporting)
 const float IGNORE_ZONE_DIST = 256; // speedhacks ignored within this distance from a trigger teleport zone (0.05s of movement)
+const float SERVER_LAG_TME = 0.2f; // time between frames to start ignoring speedhacks (probably server freeze)
+const float SERVER_LAG_GRACE_PERIOD = 1.0f; // time after server freeze to ignore speedhacks
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
@@ -62,13 +64,15 @@ int g_mode = MODE_OBSERVE;
 bool g_loaded_enable_setting = false;
 bool g_debug_mode = false;
 
+float g_last_server_lag = 0;
+
 array<Vector> g_testDirs = {
-	Vector(8, 0, 0),
-	Vector(-8, 0, 0),
-	Vector(0, 8, 0),
-	Vector(0, -8, 0),
-	Vector(0, 0, 8),
-	Vector(0, 0, -8)
+	Vector(16, 0, 0),
+	Vector(-16, 0, 0),
+	Vector(0, 16, 0),
+	Vector(0, -16, 0),
+	Vector(0, 0, 16),
+	Vector(0, 0, -16)
 };
 
 // order should match weapon ids
@@ -107,7 +111,10 @@ array<string> early_out_reasons = {
 	"Buffer",
 	"Not moving",
 	"Normal",
-	"Lag"
+	"Lag",
+	"Server lag",
+	"Throttled net",
+	"Map ignore"
 };
 
 array<IgnoreZone> g_ignore_zones;
@@ -155,7 +162,7 @@ void init() {
 	g_speedhackPrimaryTime["weapon_eagle"] = 0.305;
 	g_speedhackPrimaryTime["weapon_uzi"] = 0.076;
 	g_speedhackPrimaryTime["weapon_357"] = 0.75;
-	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.080; // actually 0.104 but sometimes it double fires
+	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.075; // actually 0.104 but sometimes it double fires
 	g_speedhackPrimaryTime["weapon_shotgun"] = 0.95;
 	g_speedhackPrimaryTime["weapon_crossbow"] = 1.55;
 	g_speedhackPrimaryTime["weapon_rpg"] = 2.0;
@@ -171,7 +178,7 @@ void init() {
 	g_speedhackPrimaryTime["weapon_displacer"] = 2.0;
 	g_speedhackPrimaryTime["weapon_tripmine"] = 0.305;
 	g_speedhackPrimaryTime["weapon_snark"] = 0.305;
-	g_speedhackPrimaryTime["weapon_m16"] = 0.15; // actually .168 but too sensitive to lag
+	g_speedhackPrimaryTime["weapon_m16"] = 0.14; // actually .168 but too sensitive to lag
 	
 	// melee weapons can't be speedhacked
 	
@@ -210,6 +217,8 @@ void init() {
 	g_speedStates.resize(g_Engine.maxClients + 1);
 	
 	find_relative_teleports();
+	
+	g_last_server_lag = -999;
 }
 
 string vectorIntString(Vector v) {
@@ -290,6 +299,7 @@ class MoveDetectFrame {
 	int sussyness;
 	int earlyOutReason;
 	float timeSincePacket;
+	int throttles;
 	
 	MoveDetectFrame() {}
 	
@@ -300,6 +310,7 @@ class MoveDetectFrame {
 		this.angles = plr.pev.v_angle;
 		this.moveDetections = state.detections;
 		this.timeSincePacket = g_Engine.time - state.lastPacket;
+		this.throttles = state.throttles;
 		
 		this.actualSpeed = -1;
 		this.expectedSpeed = -1;
@@ -312,7 +323,7 @@ class MoveDetectFrame {
 	// load from file
 	MoveDetectFrame(CBasePlayer@ plr, string line) {
 		array<string> parts = line.Split("_");
-		if (parts.size() != 11) {
+		if (parts.size() != 12) {
 			g_PlayerFuncs.ClientPrint(plr, HUD_PRINTCONSOLE, "[AntiCheat] Incompatible replay file.\n");
 			return;
 		}
@@ -329,11 +340,13 @@ class MoveDetectFrame {
 		sussyness = atoi(parts[9]);
 		earlyOutReason = atoi(parts[10]);
 		timeSincePacket = atoi(parts[11]);
+		throttles = atoi(parts[12]);
 	}
 	
 	string toString() {
 		return "" + time + "_" + vectorIntString(origin) + "_" + vectorIntString(velocity) + "_" + vectorIntString(angles) + "_" 
-				  + actualSpeed + "_" + expectedSpeed + "_" + avgActual + "_" + avgExpected + "_" + moveDetections + "_" + sussyness + "_" + earlyOutReason + "_" + timeSincePacket;
+				  + actualSpeed + "_" + expectedSpeed + "_" + avgActual + "_" + avgExpected + "_" + moveDetections + "_" + sussyness
+				  + "_" + earlyOutReason + "_" + timeSincePacket + "_" + throttles;
 	}
 }
 
@@ -376,6 +389,7 @@ class monster_ghost : ScriptBaseMonsterEntity
 
 class SpeedState {
 	int detections; // number of times speedhack detections (many false positives with bad connection)
+	int throttles; // number of times player was going slightly too slow (possible throttled connection)
 	float lastDetectTime;
 	Vector lastOrigin;
 	Vector lastVelocity;
@@ -442,16 +456,22 @@ void detect_speedhack() {
 		bool isAfk = timeSinceLastButton > AFK_TIME;
 		bool isFrozen = plr.pev.flags & FL_FROZEN != 0;
 		bool isBarnacled = plr.m_afPhysicsFlags & PFLAG_ONBARNACLE != 0;
+		bool serverWasLagged = g_Engine.time - g_last_server_lag < SERVER_LAG_GRACE_PERIOD;
+		bool ignoreMapSpeedhack = map_specific_ignore_case(plr);
 		state.lastDetectTime = g_Engine.time;
 		
 		bool isLaggedOut = timeSinceLastPacket > LAGOUT_TIME or state.waitHackCheck > g_Engine.time;
 		
-		if (isAfk or isFrozen or !plr.IsAlive()) {
+		if (isAfk or isFrozen or !plr.IsAlive() or ignoreMapSpeedhack) {
 			state.lastOrigin = plr.pev.origin;
 			state.detections = Math.max(0, state.detections-1);
 			
 			dinfo.earlyOutReason = 1;
 			state.addDebugInfoFrame(dinfo);
+			
+			if (ignoreMapSpeedhack) {
+				dinfo.earlyOutReason = 12;
+			}
 			
 			//println("PAUSE (lag)");
 			continue;
@@ -460,14 +480,26 @@ void detect_speedhack() {
 		int sussyMovement = detect_movement_speedhack(state, plr, dinfo, timeSinceLastCheck);
 		
 		float timeSinceLastMovingObjectTouch = g_Engine.time - state.lastMovingObjectContact;
-		if (timeSinceLastMovingObjectTouch < MOVING_OBJECT_PAUSE_TIME or isLaggedOut or isNoclipping or isBarnacled or timeSinceLastTeleport < TELEPORT_PAUSE) {
+		bool nearMovingObject = timeSinceLastMovingObjectTouch < MOVING_OBJECT_PAUSE_TIME;
+		bool wasTeleported = timeSinceLastTeleport < TELEPORT_PAUSE;
+		
+		if (nearMovingObject or isLaggedOut or isNoclipping or isBarnacled or wasTeleported or serverWasLagged) {
 			//println("PAUSE (Object/teleport)");
 			state.lastSpeeds.resize(0);
 			state.lastExpectedSpeeds.resize(0);
 			state.detections = 0;
 			
-			if (dinfo.earlyOutReason == 0)
-				dinfo.earlyOutReason = isLaggedOut ? 9 : 2;
+			if (dinfo.earlyOutReason == 0) {
+				dinfo.earlyOutReason = 2;
+				
+				if (serverWasLagged) {
+					dinfo.earlyOutReason = 10;
+				}
+				else if (isLaggedOut) {
+					dinfo.earlyOutReason = 9;
+				}
+			}
+				
 			state.addDebugInfoFrame(dinfo);
 			
 			continue;
@@ -482,6 +514,7 @@ void detect_speedhack() {
 			state.detections -= 1;
 		}
 		
+		//if (state.detections > 0)
 		//println("SPEEDHACK: " + state.detections + " (+" + sussyMovement + ") " + timeSinceLastPacket);
 		
 		if (state.detections > HACK_DETECTION_MAX && plr.IsAlive()) {
@@ -523,6 +556,15 @@ bool is_near_teleport_trigger(CBasePlayer@ plr) {
 	return false;
 }
 
+bool map_specific_ignore_case(CBasePlayer@ plr) {
+	// ignore speedhacks on the board because it has tons of undetectable teleports
+	if (g_Engine.mapname == "botparty" and plr.pev.origin.z < -2600 and plr.pev.origin.z > -3200) {
+		return true;
+	}
+	
+	return false;
+}
+
 void kill_hacker(SpeedState@ state, CBasePlayer@ plr, string reason, string shortReason) {
 	if (g_mode == MODE_ENABLE) {
 		plr.Killed(g_EntityFuncs.Instance( 0 ).pev, GIB_ALWAYS);
@@ -553,6 +595,12 @@ void detect_jumpbug() {
 		return;
 	}
 	
+	if (g_Engine.frametime > SERVER_LAG_TME) {
+		g_last_server_lag = g_Engine.time;
+	}
+	
+	bool serverIsLagged = g_Engine.time - g_last_server_lag < SERVER_LAG_GRACE_PERIOD;
+	
 	for (int i = 1; i <= g_Engine.maxClients; i++) {
 		CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(i);
 		
@@ -572,7 +620,7 @@ void detect_jumpbug() {
 		bool perfectlyTimedJump = (plr.m_afButtonPressed | plr.m_afButtonReleased) & (IN_JUMP | IN_DUCK) != 0;
 		bool preventedDamage = plr.pev.health == state.lastHealth and plr.pev.waterlevel == 0;
 		
-		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage)  {
+		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage and !serverIsLagged)  {
 			TraceResult tr;
 			HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
 			g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + Vector(0, 0, -16), dont_ignore_monsters, hullType, plr.edict(), tr );
@@ -598,6 +646,7 @@ void detect_jumpbug() {
 			state.lastTeleport = g_Engine.time;
 		}
 	}
+	
 }
 
 // returns how extreme the speed difference in (1 = minor, 2+ major)
@@ -621,7 +670,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 		bool isMoving = pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1;
 		
 		if (isMoving or pHit.IsMonster() or pHit.pev.classname == "func_conveyor") {
-			println("IGNORE " + pHit.pev.classname);
+			//println("IGNORE " + pHit.pev.classname);
 			state.lastMovingObjectContact = g_Engine.time;
 			dinfo.earlyOutReason = 3;
 			return 0;
@@ -692,6 +741,24 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 	bool movingTooFast = avgActual > MOVEMENT_HACK_MIN && avgActual > avgExpected*MOVEMENT_HACK_RATIO_FAST;
 	bool movingTooSlow = avgExpected > MOVEMENT_HACK_MIN && avgActual < avgExpected*MOVEMENT_HACK_RATIO_SLOW;
 	bool isSpeedWrong = movingTooFast || movingTooSlow;
+	
+	// if player is moving slightly too slow, their connection might be throttled.
+	// Forgive the next speedhack if it's only fast enough to undo the previous slowness
+	// and it if happens soon after the throttled packets.
+	if (avgActual < avgExpected*0.9) {
+		state.throttles += 1;		
+		if (state.throttles > 20) { // max 1 second of throttle forgiveness
+			state.throttles = 20;
+		}
+	else if (movingTooFast and state.throttles > 0) {
+		state.throttles -= 1;
+		dinfo.earlyOutReason = 11;
+		return 0;
+	}
+	} else if (state.throttles > 0) {
+		state.throttles -= 1;
+	}
+	dinfo.throttles = state.throttles;
 	
 	if (movingTooFast) {
 		println("TOO FAST " + (avgActual / avgExpected));
