@@ -115,7 +115,8 @@ array<string> early_out_reasons = {
 	"Lag",
 	"Server lag",
 	"Throttled net",
-	"Map ignore"
+	"Map ignore",
+	"Steep slope fall"
 };
 
 array<IgnoreZone> g_ignore_zones;
@@ -663,6 +664,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 	Vector expectedVelocity = plr.pev.velocity + plr.pev.basevelocity;
 	
 	HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
+	Vector groundNormal = Vector(0,0,1);
 
 	// velocity/collision gets weird on and around moving objects, ignore those cases
 	Vector start = plr.pev.origin;
@@ -673,6 +675,10 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 		
 		if (pHit is null) {
 			continue;
+		}
+		
+		if (i == 5) {
+			groundNormal = tr.vecPlaneNormal;
 		}
 		
 		bool isMoving = pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1;
@@ -702,6 +708,24 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 	
 	dinfo.actualSpeed = actualSpeed;
 	dinfo.expectedSpeed = expectedSpeed;
+	
+	/*
+	Vector normalExpected = expectedVelocity.Normalize();
+	Vector normalActual = originDiff.Normalize();
+	
+	if (DotProduct(expectedVelocity, originDiff) < -0.1) {
+		// going opposite direction of velocity happens when sliding down slope sometimes
+		return 0;
+	}
+	*/
+	
+	// fix false positives slowing down your decent on a steep slope while also touching a wall
+	// speedhacking here would be pointless and make it harder to survive
+	if (actualSpeed > expectedSpeed*MOVEMENT_HACK_RATIO_FAST and groundNormal.z < 0.7 and plr.pev.velocity.z < 0) {
+		dinfo.earlyOutReason = 13;
+		state.detections = 0;
+		return 0;
+	}
 
 	if (actualSpeed < expectedSpeed*MOVEMENT_HACK_RATIO_SLOW) {
 		// got stuck between two surfaces and is building velocity while not moving.
