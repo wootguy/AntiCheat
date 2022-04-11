@@ -28,7 +28,6 @@ class IgnoreZone {
 
 const float MOVEMENT_HACK_RATIO_FAST = 1.2f; // how much faster actual speed can be than expected
 const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much slower actual speed can be than expected
-const float MOVEMENT_HACK_MIN = 96; // min movement speed before detecting speedhack (detection inaccurate at low values)
 const int HACK_DETECTION_MAX = 20; // max number of detections before killing player (expect some false positives)
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min speed for damage)
 const float MAX_WEAPON_SPEEDUP = 1.2f; // how much faster actual weapon shoot speed than expected
@@ -48,6 +47,7 @@ const float TELEPORT_RADIUS = 128; // radius around teleport destinations to ign
 const float IGNORE_ZONE_DIST = 256; // speedhacks ignored within this distance from a trigger teleport zone (0.05s of movement)
 const float SERVER_LAG_TME = 0.2f; // time between frames to start ignoring speedhacks (probably server freeze)
 const float SERVER_LAG_GRACE_PERIOD = 1.0f; // time after server freeze to ignore speedhacks
+const float STRAFE_MOVESPEED_BOOST = 1.56f; // how much faster you move when wall strafing or turning while forward strafing
 
 CCVar@ g_enable;
 CCVar@ g_killPenalty;
@@ -658,6 +658,16 @@ void detect_jumpbug() {
 	
 }
 
+float getMaxSpeed(CBasePlayer@ plr) {
+	float maxSpeed = plr.pev.maxspeed;
+	
+	if (plr.pev.flags & FL_DUCKING != 0) {
+		maxSpeed /= 3.0f;
+	}
+	
+	return maxSpeed * STRAFE_MOVESPEED_BOOST;
+}
+
 // returns how extreme the speed difference in (1 = minor, 2+ major)
 int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFrame@ dinfo, float timeSinceLastCheck) {
 	Vector originDiff = plr.pev.origin - state.lastOrigin;
@@ -769,9 +779,14 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 		return 0;
 	}
 	
+	// max speed when running normally or wall strafing
+	// speedhacks slower than this are ignored because there's nothing gained by cheating that slowly
+	// and because weird false positives come up when someone spams the USE key which rapidly changes velocity
+	float maxMoveSpeed = getMaxSpeed(plr);
+	
 	float errorRatio = avgActual / avgExpected;
-	bool movingTooFast = avgActual > MOVEMENT_HACK_MIN && avgActual > avgExpected*MOVEMENT_HACK_RATIO_FAST;
-	bool movingTooSlow = avgExpected > MOVEMENT_HACK_MIN && avgActual < avgExpected*MOVEMENT_HACK_RATIO_SLOW;
+	bool movingTooFast = avgActual > maxMoveSpeed && avgActual > avgExpected*MOVEMENT_HACK_RATIO_FAST;
+	bool movingTooSlow = avgExpected > maxMoveSpeed && avgActual < avgExpected*MOVEMENT_HACK_RATIO_SLOW;
 	bool isSpeedWrong = movingTooFast || movingTooSlow;
 	
 	// if player is moving slightly too slow, their connection might be throttled.
@@ -1139,9 +1154,10 @@ void debug_detect_replay(EHandle h_watcher, EHandle h_ghost, array<MoveDetectFra
 					
 					int nextFrameTime = k < int(frames.size())-1 ? int((frames[k+1].time - frame.time)*1000) : -1;
 					println("Frame " + formatInt(k, "", 3)
-							+ ", Speeds: " + formatInt(int(frame.actualSpeed), "", 4) + " / " + formatInt(int(frame.expectedSpeed), "", 4) + " = " + formatFloat(error, "", 6, 2)
-							+ ", AvgSpeeds: " + formatInt(int(frame.avgActual), "", 4) + " / " + formatInt(int(frame.avgExpected), "", 4) + " = " + formatFloat(avgError, "", 6, 2)
-							+ ", detections: " + formatInt(frame.moveDetections, "", 2) 
+							+ ", Speed: " + formatInt(int(frame.actualSpeed), "", 4) + " / " + formatInt(int(frame.expectedSpeed), "", 4) + " = " + formatFloat(error, "", 6, 2)
+							+ ", Avg: " + formatInt(int(frame.avgActual), "", 4) + " / " + formatInt(int(frame.avgExpected), "", 4) + " = " + formatFloat(avgError, "", 6, 2)
+							+ ", detect: " + formatInt(frame.moveDetections, "", 2) 
+							+ ", throttle: " + formatInt(frame.throttles, "", 2) 
 							+ ", nextFrame: " + formatInt(nextFrameTime, "", 3) + "ms"
 							+ ", Status: " + earlyOut);
 							
