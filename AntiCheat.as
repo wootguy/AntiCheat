@@ -7,6 +7,7 @@
 // - pausing near pushing entities is overkill yet still triggers false positives
 // - less tolerant for 1.4x weapon speedup over long durations, maybe go down to 1.1x
 // - shock_rifle secondary speedhack ignored
+// - can fire rpg faster if standing on ammo (weapon reloads when picking up ammo sometimes)
 
 enum MODE {
 	MODE_DISABLE, // disable all checks (for testing server lag)
@@ -30,7 +31,7 @@ const float MOVEMENT_HACK_RATIO_FAST = 1.2f; // how much faster actual speed can
 const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much slower actual speed can be than expected
 const int HACK_DETECTION_MAX = 20; // max number of detections before killing player (expect some false positives)
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min speed for damage)
-const float MAX_WEAPON_SPEEDUP = 1.2f; // how much faster actual weapon shoot speed than expected
+const float MAX_WEAPON_SPEEDUP = 1.3f; // how much faster actual weapon shoot speed than expected
 const float WEAPON_ANALYZE_TIME = 1.5f; // minimum continous shooting time to detect hacking
 const float MIN_BULLET_DELAY = 0.05f; // a little faster than the fastest shooting weapon
 const int BULLET_HISTORY_SIZE = (WEAPON_ANALYZE_TIME / MIN_BULLET_DELAY);
@@ -171,7 +172,7 @@ void init() {
 	g_speedhackPrimaryTime["weapon_eagle"] = 0.305;
 	g_speedhackPrimaryTime["weapon_uzi"] = 0.076;
 	g_speedhackPrimaryTime["weapon_357"] = 0.75;
-	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.075; // actually 0.104 but sometimes it double fires
+	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.1; // sometimes it double fires
 	g_speedhackPrimaryTime["weapon_shotgun"] = 0.95;
 	g_speedhackPrimaryTime["weapon_crossbow"] = 1.55;
 	g_speedhackPrimaryTime["weapon_rpg"] = 2.0;
@@ -412,6 +413,7 @@ class SpeedState {
 	float lastSecondaryCooldown = 0;
 	float lastAttack = 0;
 	float lastWeaponAnim = 0;
+	bool doubleFired = false;
 
 	array<float> lastSpeeds;
 	array<float> lastExpectedSpeeds;
@@ -632,7 +634,7 @@ void detect_jumpbug() {
 		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage and !serverIsLagged)  {
 			TraceResult tr;
 			HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
-			g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + Vector(0, 0, -16), dont_ignore_monsters, hullType, plr.edict(), tr );
+			g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + Vector(0, 0, -8), dont_ignore_monsters, hullType, plr.edict(), tr );
 			
 			// touching or slightly above ground?
 			if (tr.flFraction < 1.0f) {
@@ -948,6 +950,28 @@ HookReturnCode PlayerPostThink(CBasePlayer@ plr) {
 		}
 		
 		if (bulletTimes !is null) {
+			if (bulletTimes.size() >= 2) {
+				float lastBulletTime = bulletTimes[bulletTimes.size()-1];
+				float lastLastBulletTime = bulletTimes[bulletTimes.size()-2];
+				
+				float timeSinceLast = g_Engine.time - lastBulletTime;
+				float timeBetweenLastAndPrev = lastBulletTime - lastLastBulletTime;
+				
+				bool reallyFastFire = timeSinceLast < cooldown*0.2f;
+				bool previousWasNotTooFast = timeBetweenLastAndPrev >= cooldown * (1.0f/MAX_WEAPON_SPEEDUP);
+				
+				
+				if (reallyFastFire and previousWasNotTooFast and !state.doubleFired) {
+					// don't add this bullet to the history, probably was a double-fire bug
+					state.doubleFired = true;
+					println("DOUBLE FIRED");
+					return HOOK_CONTINUE; 
+				}
+				
+				state.doubleFired = false;
+			}
+			
+		
 			bulletTimes.insertLast(g_Engine.time);
 			if (bulletTimes.size() > BULLET_HISTORY_SIZE) {
 				bulletTimes.removeAt(0);
