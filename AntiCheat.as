@@ -28,7 +28,7 @@ class IgnoreZone {
 }
 
 const float MOVEMENT_HACK_RATIO_FAST = 1.2f; // how much faster actual speed can be than expected
-const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much slower actual speed can be than expected
+const float MOVEMENT_HACK_RATIO_SLOW = 0.8f; // how much slower actual speed can be than expected
 const int HACK_DETECTION_MAX = 20; // max number of detections before killing player (expect some false positives)
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min speed for damage)
 const float MAX_WEAPON_SPEEDUP = 1.3f; // how much faster actual weapon shoot speed than expected
@@ -67,6 +67,8 @@ bool g_loaded_enable_setting = false;
 bool g_debug_mode = false;
 
 float g_last_server_lag = 0;
+
+bool g_falldamage_enabled = false;
 
 array<Vector> g_testDirs = {
 	Vector(16, 0, 0),
@@ -172,7 +174,7 @@ void init() {
 	g_speedhackPrimaryTime["weapon_eagle"] = 0.305;
 	g_speedhackPrimaryTime["weapon_uzi"] = 0.076;
 	g_speedhackPrimaryTime["weapon_357"] = 0.75;
-	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.1; // sometimes it double fires
+	g_speedhackPrimaryTime["weapon_9mmAR"] = 0.09; // sometimes it double fires
 	g_speedhackPrimaryTime["weapon_shotgun"] = 0.95;
 	g_speedhackPrimaryTime["weapon_crossbow"] = 1.55;
 	g_speedhackPrimaryTime["weapon_rpg"] = 2.0;
@@ -227,6 +229,8 @@ void init() {
 	g_speedStates.resize(g_Engine.maxClients + 1);
 	
 	find_relative_teleports();
+	
+	g_falldamage_enabled = g_EngineFuncs.CVarGetFloat("mp_falldamage") != -1;
 	
 	g_last_server_lag = -999;
 }
@@ -631,13 +635,16 @@ void detect_jumpbug() {
 		bool perfectlyTimedJump = (plr.m_afButtonPressed | plr.m_afButtonReleased) & (IN_JUMP | IN_DUCK) != 0;
 		bool preventedDamage = plr.pev.health == state.lastHealth and plr.pev.waterlevel == 0;
 		
-		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage and !serverIsLagged)  {
+		if (jumpedInstantlyAfterLanding and perfectlyTimedJump and preventedDamage and !serverIsLagged and g_falldamage_enabled)  {
 			TraceResult tr;
 			HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
 			g_Utility.TraceHull( plr.pev.origin, plr.pev.origin + Vector(0, 0, -8), dont_ignore_monsters, hullType, plr.edict(), tr );
 			
+			// you take no fall damage when landing into an updward slope at high speed. Instead you slide up it.
+			bool launchingOffRamp = tr.vecPlaneNormal.z != 1 and tr.flFraction < 0.01f;
+			
 			// touching or slightly above ground?
-			if (tr.flFraction < 1.0f) {
+			if (tr.flFraction < 1.0f and !launchingOffRamp) {
 				kill_hacker(state, plr, "using the jumpbug cheat", "jumpbug");
 			}			
 		}
@@ -677,6 +684,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 	
 	HULL_NUMBER hullType = plr.pev.flags & FL_DUCKING != 0 ? head_hull : human_hull;
 	Vector groundNormal = Vector(0,0,1);
+	bool onGround = false;
 
 	// velocity/collision gets weird on and around moving objects, ignore those cases
 	Vector start = plr.pev.origin;
@@ -691,6 +699,7 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 		
 		if (i == 5) {
 			groundNormal = tr.vecPlaneNormal;
+			onGround = true;
 		}
 		
 		bool isMoving = pHit.pev.velocity.Length() > 1 or pHit.pev.avelocity.Length() > 1;
@@ -711,8 +720,10 @@ int detect_movement_speedhack(SpeedState@ state, CBasePlayer@ plr, MoveDetectFra
 	}
 	
 	// going up/down slopes makes velocity appear faster than it is
-	originDiff.z = 0;
-	expectedVelocity.z = 0;
+	if (onGround) {
+		originDiff.z = 0;
+		expectedVelocity.z = 0;
+	}
 	
 	float expectedSpeed = (expectedVelocity).Length();
 	float actualSpeed = originDiff.Length() * (1.0f / timeSinceLastCheck);
