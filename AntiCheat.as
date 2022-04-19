@@ -657,11 +657,24 @@ void detect_jumpbug() {
 			state.lastTeleport = g_Engine.time;
 		}
 		
-		CustomKeyvalues@ tCustom = plr.GetCustomKeyvalues();
-		CustomKeyvalue tValue( tCustom.GetKeyvalue( "$f_lastAntiBlock" ) );
-		float time = tValue.GetFloat();
-		if (time >= g_Engine.time) {
-			state.lastTeleport = g_Engine.time;
+		// antiblock plugin teleported this player slightly?
+		{
+			CustomKeyvalues@ tCustom = plr.GetCustomKeyvalues();
+			CustomKeyvalue tValue( tCustom.GetKeyvalue( "$f_lastAntiBlock" ) );
+			float time = tValue.GetFloat();
+			if (time >= g_Engine.time) {
+				state.lastTeleport = g_Engine.time;
+			}
+		}
+		
+		// portal spawner plugin teleported this player?
+		{
+			CustomKeyvalues@ tCustom = plr.GetCustomKeyvalues();
+			CustomKeyvalue tValue( tCustom.GetKeyvalue( "$f_lastPsTele" ) );
+			float time = tValue.GetFloat();
+			if (time >= g_Engine.time) {
+				state.lastTeleport = g_Engine.time;
+			}
 		}
 	}
 	
