@@ -30,7 +30,7 @@ class IgnoreZone {
 }
 
 const float MOVEMENT_HACK_RATIO_FAST = 1.2f; // how much faster actual speed can be than expected
-const float MOVEMENT_HACK_RATIO_SLOW = 0.8f; // how much slower actual speed can be than expected
+const float MOVEMENT_HACK_RATIO_SLOW = 0.5f; // how much slower actual speed can be than expected
 const int HACK_DETECTION_MAX = 20; // max number of detections before killing player (expect some false positives)
 const float JUMPBUG_SPEED = 580; // fall speed to detect jump bug (min speed for damage)
 const float MAX_WEAPON_SPEEDUP = 1.3f; // how much faster actual weapon shoot speed than expected
