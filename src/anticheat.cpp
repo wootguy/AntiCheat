@@ -47,14 +47,16 @@ void CvarValue2(const edict_t* pEnt, int requestID, const char* cvarName, const 
 }
 
 uint64_t lastCheck = 0;
+int checkType = 0;
 
 void StartFrame() {
 	uint64_t now = getEpochMillis();
 	if (TimeDifference(lastCheck, now) < 10.0f) {
-		return;
+		RETURN_META(MRES_IGNORED);
 	}
 
 	lastCheck = now;
+	checkType++;
 
 	for (int i = 1; i <= gpGlobals->maxClients; i++) {
 		edict_t* plr = INDEXENT(i);
@@ -63,8 +65,12 @@ void StartFrame() {
 			continue;
 		}
 
-		(*g_engfuncs.pfnQueryClientCvarValue2)(plr, "sc_speedhack", 1337);
-		(*g_engfuncs.pfnQueryClientCvarValue2)(plr, "sc_speedhack_ltfx", 1337);
+		if (checkType % 2 == 0) {
+			(*g_engfuncs.pfnQueryClientCvarValue2)(plr, "sc_speedhack", 1337);
+		}
+		else {
+			(*g_engfuncs.pfnQueryClientCvarValue2)(plr, "sc_speedhack_ltfx", 1337);
+		}		
 	}
 	RETURN_META(MRES_IGNORED);
 }

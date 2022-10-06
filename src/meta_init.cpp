@@ -3,6 +3,8 @@
 #include <meta_api.h>
 #include "meta_init.h"
 #include <h_export.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 // Must provide at least one of these..
 static META_FUNCTIONS gMetaFunctionTable = {
@@ -136,7 +138,7 @@ void UTIL_LogPrintf(char* fmt, ...)
 	static char		string[1024];
 
 	va_start(argptr, fmt);
-	vsnprintf_s(string, sizeof(string), fmt, argptr);
+	vsnprintf(string, sizeof(string), fmt, argptr);
 	va_end(argptr);
 
 	// Print to server console

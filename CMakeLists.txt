@@ -22,24 +22,25 @@ include_directories(include/hlsdk/pm_shared)
 
 add_library(${PROJECT_NAME} SHARED ${SOURCE_FILES})
 
-set_target_properties(${PROJECT_NAME} PROPERTIES
-                      RUNTIME_OUTPUT_DIRECTORY_DEBUG "${SVEN_ROOT_PATH}/${DLL_INSTALL_PATH}"
-                      RUNTIME_OUTPUT_DIRECTORY_RELEASE "${SVEN_ROOT_PATH}/${DLL_INSTALL_PATH}")
-				
-# can't overwrite dll while its loaded but it can be renamed, then you can run "meta reload <plugin>" to update it in-game				
-add_custom_command(TARGET ${PROJECT_NAME}  PRE_BUILD
-    COMMAND ${CMAKE_CURRENT_LIST_DIR}/replace_dll.bat
-)
-
 if(MSVC)											
 	set_target_properties(${PROJECT_NAME} PROPERTIES
 					  VS_STARTUP_PROJECT ${PROJECT_NAME}
 					  VS_DEBUGGER_COMMAND "svencoop.exe"
 					  VS_DEBUGGER_COMMAND_ARGUMENTS "+map stadium4 -nomsaa -nofbo -noborder -condebug"
 					  VS_DEBUGGER_WORKING_DIRECTORY "${SVEN_ROOT_PATH}")
+					  
+	set_target_properties(${PROJECT_NAME} PROPERTIES
+                      RUNTIME_OUTPUT_DIRECTORY_DEBUG "${SVEN_ROOT_PATH}/${DLL_INSTALL_PATH}"
+                      RUNTIME_OUTPUT_DIRECTORY_RELEASE "${SVEN_ROOT_PATH}/${DLL_INSTALL_PATH}")
+				
+	# can't overwrite dll while its loaded but it can be renamed, then you can run "meta reload <plugin>" to update it in-game				
+	add_custom_command(TARGET ${PROJECT_NAME}  PRE_BUILD
+		COMMAND ${CMAKE_CURRENT_LIST_DIR}/replace_dll.bat
+	)
 
 else()
-	set(CMAKE_CXX_FLAGS "-Wall -std=c++11")
+	set(CMAKE_CXX_FLAGS "-Wall -std=c++11 -m32")
 	set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 	set(CMAKE_CXX_FLAGS_RELEASE "-Os -fno-exceptions -w -Wfatal-errors")
+	target_compile_definitions(${PROJECT_NAME} PUBLIC -Dlinux)
 endif()
