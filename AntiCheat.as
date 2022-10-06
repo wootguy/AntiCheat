@@ -1,3 +1,5 @@
+#include "../inc/RelaySay"
+
 // False positives:
 // - stuck inside tentacle
 // - portal spawner teleports
@@ -128,6 +130,7 @@ CClientCommand _anticheat("anticheat", "AntiCheat", @anticheatToggle, ConCommand
 CClientCommand _replay("rpcheat", "AntiCheat", @replayCheater, ConCommandFlag::AdminOnly );
 
 CConCommand@ cmdAnticheat;
+CConCommand@ cmdCheaterFound;
 
 void print(string text) { g_Game.AlertMessage( at_console, text); }
 void println(string text) { print(text + "\n"); }
@@ -141,10 +144,11 @@ void PluginInit() {
 	g_Scheduler.SetInterval("detect_speedhack", 0.05f, -1);
 	g_Scheduler.SetInterval("detect_jumpbug", 0.0f, -1);
 	
-	@g_enable = CCVar("enable", 1, "Toggle anticheat", ConCommandFlag::AdminOnly);
+	@g_enable = CCVar("enable", 0, "Toggle anticheat", ConCommandFlag::AdminOnly);
 	@g_killPenalty = CCVar("kill_penalty", 6, "respawn delay for killed speedhackers", ConCommandFlag::AdminOnly);
 	
 	@cmdAnticheat = @CConCommand( "mode", "Set anticheat mode", @anticheatToggle );
+	@cmdCheaterFound = @CConCommand( "cheaterFound", "Cross-plugin command", @cheaterFound );
 	
 	init();
 }
@@ -1051,6 +1055,18 @@ void anticheatToggle( const CCommand@ args )
 		string user = plr !is null ? "-" + string(plr.pev.netname) : "";
 		g_Log.PrintF("[AntiCheat] " + newMode + "\n");
 	}
+}
+
+void cheaterFound(const CCommand@ args) {
+	CBasePlayer@ plr = g_PlayerFuncs.FindPlayerByIndex(atoi(args[1]));
+	
+	if (plr is null or !plr.IsConnected()) {
+		return;
+	}
+	
+	RelaySay("" + plr.pev.netname + " was kicked for using cheat mods.\n");
+	g_PlayerFuncs.ClientPrintAll(HUD_PRINTTALK, "[AntiCheat] " + plr.pev.netname + " was kicked for using cheat mods.\n");
+	g_EngineFuncs.ServerCommand("kick #" + g_EngineFuncs.GetPlayerUserId(plr.edict()) + " Disable your cheat mod.\n");
 }
 
 void writeReplayData(SpeedState@ state, CBasePlayer@ plr, string reason) {
