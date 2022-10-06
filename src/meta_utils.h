@@ -14,11 +14,11 @@ using namespace std; // ohhh yesss
 // get a player index as a bitfield index
 #define PLAYER_BIT(edt) (1 << (ENTINDEX(edt) % 32))
 
-#define print(fmt,...) {ALERT(at_console, (char*)string(fmt).c_str(), __VA_ARGS__);}
-#define println(fmt,...) {ALERT(at_console, (char*)string(fmt).c_str(), __VA_ARGS__); ALERT(at_console, "\n"); }
+#define print(fmt,...) {ALERT(at_console, (char*)string(fmt).c_str(), ##__VA_ARGS__);}
+#define println(fmt,...) {ALERT(at_console, (char*)string(fmt).c_str(), ##__VA_ARGS__); ALERT(at_console, "\n"); }
 
-#define log(fmt, ...) {ALERT(at_logged, (char*)string(fmt).c_str(), __VA_ARGS__);}
-#define logln(fmt,...) {ALERT(at_logged, (char*)string(fmt).c_str(), __VA_ARGS__); ALERT(at_logged, "\n"); }
+#define log(fmt, ...) {ALERT(at_logged, (char*)string(fmt).c_str(), ##__VA_ARGS__);}
+#define logln(fmt,...) {ALERT(at_logged, (char*)string(fmt).c_str(), ##__VA_ARGS__); ALERT(at_logged, "\n"); }
 
 enum AdminLevel_t {
 	ADMIN_INIT = -1,

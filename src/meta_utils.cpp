@@ -81,7 +81,7 @@ void ClientPrint(edict_t* client, int msg_dest, const char* msg_name, const char
 	MESSAGE_END();
 }
 
-static unsigned short FixedUnsigned16(float value, float scale)
+unsigned short FixedUnsigned16(float value, float scale)
 {
 	int output;
 
@@ -94,7 +94,7 @@ static unsigned short FixedUnsigned16(float value, float scale)
 	return (unsigned short)output;
 }
 
-static short FixedSigned16(float value, float scale)
+short FixedSigned16(float value, float scale)
 {
 	int output;
 
