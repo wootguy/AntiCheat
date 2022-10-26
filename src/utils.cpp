@@ -1,12 +1,12 @@
 #include "utils.h"
 #include "anticheat.h"
 
-string getPlayerUniqueId(edict_t* plr) {
+const char* getPlayerUniqueId(edict_t* plr) {
 	if (plr == NULL) {
 		return "STEAM_ID_NULL";
 	}
 
-	string steamId = (*g_engfuncs.pfnGetPlayerAuthId)(plr);
+	const char* steamId = (*g_engfuncs.pfnGetPlayerAuthId)(plr);
 
 	if (steamId == "STEAM_ID_LAN" || steamId == "BOT") {
 		steamId = STRING(plr->v.netname);

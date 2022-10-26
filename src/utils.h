@@ -8,7 +8,7 @@ edict_t* getPlayerByUniqueId(string id);
 // user IDs change every time a user connects to the server
 edict_t* getPlayerByUserId(int id);
 
-string getPlayerUniqueId(edict_t* plr);
+const char* getPlayerUniqueId(edict_t* plr);
 
 bool isValidPlayer(edict_t* plr);
 
