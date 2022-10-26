@@ -18,7 +18,7 @@ using namespace std; // ohhh yesss
 #define println(fmt,...) {ALERT(at_console, (char*)string(fmt).c_str(), ##__VA_ARGS__); ALERT(at_console, "\n"); }
 
 #define log(fmt, ...) {ALERT(at_logged, (char*)string(fmt).c_str(), ##__VA_ARGS__);}
-#define logln(fmt,...) {ALERT(at_logged, (char*)string(fmt).c_str(), ##__VA_ARGS__); ALERT(at_logged, "\n"); }
+#define logln(fmt,...) {ALERT(at_logged, (char*)(string(fmt) + "\n").c_str(), ##__VA_ARGS__); }
 
 enum AdminLevel_t {
 	ADMIN_INIT = -1,
