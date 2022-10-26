@@ -10,6 +10,7 @@ using namespace std;
 #define MIN_SPEEDHACK_LOG_DELAY_SECONDS 1.0f // don't log speedhacks for the same player faster than this
 #define MIN_SPEEDHACK_DURATION 1.0f // how long to wait until a speed is normalized to consider a hack finished
 #define MAX_SPEEDHACK_DURATION 10.0f // don't wait until speed normalizes to log, if hack lasts longer than this
+#define JUMPBUG_SPEED 580
 
 // Description of plugin
 plugin_info_t Plugin_info = {
@@ -41,6 +42,11 @@ struct PlayerDat {
 	int fastDetections; // number of speedup millis since last logging - used to indicate hack severity.
 	int slowDetections; // number of slowdown detections
 
+	bool jumpOrDuckButtonsChanged;
+	bool jumpedInstantlyAfterLanding;
+	float lastHealth;
+	float lastVelocityZ; // for jumpbug detection
+
 	int speedhackState = SPEEDHACK_NOT;
 };
 
@@ -49,6 +55,7 @@ PlayerDat playerDat[32];
 uint64_t lastDriftCorrection = 0;
 
 cvar_t* g_maxErrorSeconds;
+cvar_t* g_jumpbugCheck;
 bool g_enabled = true;
 
 void PluginInit() {
@@ -61,13 +68,18 @@ void PluginInit() {
 	// Test speedhacks using sven_internal (sc_speedhack Use < 1.0 to "recharge")
 	g_maxErrorSeconds = RegisterCVar("anticheat.maxCmdProcessMs", "300", 300, 0);
 
+	// enables jumpbug checks
+	g_jumpbugCheck = RegisterCVar("anticheat.jumpbug", "1", 1, 0);
+
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
 	g_dll_hooks.pfnClientPutInServer = ClientJoin;
 	g_dll_hooks.pfnServerActivate = MapInit;
 	g_dll_hooks.pfnPlayerPreThink = PlayerPreThink;
 	g_dll_hooks.pfnPlayerPostThink = PlayerPostThink;
+	g_dll_hooks_post.pfnPlayerPostThink = PlayerPostThink_post;
 	g_dll_hooks.pfnPM_Move = PM_Move;
+	g_dll_hooks_post.pfnPM_Move = PM_Move_post;
 }
 
 void PluginExit() {}
@@ -80,24 +92,6 @@ void MapInit(edict_t* pEdictList, int edictCount, int clientMax) {
 void ClientJoin(edict_t* plr) {
 	int idx = ENTINDEX(plr) - 1;
 	memset(&playerDat[idx], 0, sizeof(PlayerDat));
-
-	RETURN_META(MRES_IGNORED);
-}
-
-void PlayerPreThink(edict_t* plr) {
-	if (g_enabled && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
-		// not sure what this prevents but better safe than sorry
-		RETURN_META(MRES_SUPERCEDE);
-	}
-
-	RETURN_META(MRES_OVERRIDE);
-}
-
-void PlayerPostThink(edict_t* plr) {
-	if (g_enabled && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
-		// prevent weapon speedhack
-		RETURN_META(MRES_SUPERCEDE);
-	}
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -130,12 +124,86 @@ void log_speedhack(PlayerDat& dat, uint64_t now, int player_index) {
 	}
 }
 
-void PM_Move(struct playermove_s* ppmove, int server) {
+// called before movement code runs, to check button presses and set initial values
+void kill_jumpbug_cheaters_phase1(playermove_s* ppmove, edict_t* plr, PlayerDat& dat) {
+	dat.lastHealth = plr->v.health;
+	dat.lastVelocityZ = ppmove->velocity.z;
+	dat.jumpedInstantlyAfterLanding = false;
+	dat.jumpOrDuckButtonsChanged = ((ppmove->oldbuttons ^ ppmove->cmd.buttons) & (IN_JUMP | IN_DUCK)) != 0;
+}
+
+// called after movement code, to detect if player jumped instantly after landing
+void kill_jumpbug_cheaters_phase2(playermove_s* ppmove, edict_t* plr, PlayerDat& dat) {
+	dat.jumpedInstantlyAfterLanding = dat.lastVelocityZ < -JUMPBUG_SPEED && ppmove->velocity.z > 128;
+}
+
+// called after PostThink, to check if player avoided damage
+void kill_jumpbug_cheaters_phase3(edict_t* plr, PlayerDat& dat) {
+	bool preventedDamage = plr->v.health == dat.lastHealth && plr->v.waterlevel == 0 && plr->v.takedamage != DAMAGE_NO;
+
+	if (dat.jumpedInstantlyAfterLanding && dat.jumpOrDuckButtonsChanged && preventedDamage) {
+		if (g_engfuncs.pfnCVarGetFloat("mp_falldamage") == -1) {
+			return; // not cheating if fall damage is disabled
+		}
+		
+		TraceResult tr;
+		int hullType = (plr->v.flags & FL_DUCKING) != 0 ? head_hull : human_hull;
+		Vector traceEnd = plr->v.origin;
+		traceEnd.z -= 8;
+
+		g_engfuncs.pfnTraceHull(plr->v.origin, traceEnd, dont_ignore_monsters, hullType, plr, &tr);
+
+		// you take no fall damage when landing into an updward slope at high speed. Instead you slide up it.
+		bool launchingOffRamp = tr.vecPlaneNormal.z != 1 && tr.flFraction < 0.01f;
+
+		// touching or slightly above ground?
+		if (tr.flFraction < 1.0f && !launchingOffRamp) {
+			const char* steamid = getPlayerUniqueId(plr);
+			Vector origin = plr->v.origin;
+
+			if (g_jumpbugCheck->value != 0) {
+				ClientPrintAll(HUD_PRINTNOTIFY, UTIL_VarArgs("[AntiCheat] %s was killed for using the jumpbug cheat.\n", STRING(plr->v.netname)));
+				gpGamedllFuncs->dllapi_table->pfnClientKill(plr);
+			}
+
+			logln("[AntiCheat] Jumpbug on %s (%s): map=%s, origin=%d %d %d",
+				STRING(plr->v.netname), steamid, gpGlobals->mapname, (int)origin.x, (int)origin.y, (int)origin.z);
+		}
+	}
+}
+
+void PlayerPreThink(edict_t* plr) {
+	if (g_enabled && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
+		// not sure what this prevents but better safe than sorry
+		RETURN_META(MRES_SUPERCEDE);
+	}
+
+	RETURN_META(MRES_OVERRIDE);
+}
+
+void PlayerPostThink(edict_t* plr) {
+	if (g_enabled && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
+		// prevent weapon speedhack
+		RETURN_META(MRES_SUPERCEDE);
+	}
+
+	RETURN_META(MRES_IGNORED);
+}
+
+void PlayerPostThink_post(edict_t* plr) {
+	PlayerDat& dat = playerDat[ENTINDEX(plr) - 1];
+
+	kill_jumpbug_cheaters_phase3(plr, dat);
+	RETURN_META(MRES_IGNORED);
+}
+
+void PM_Move(playermove_s* ppmove, int server) {
 	if (!g_enabled) {
 		RETURN_META(MRES_IGNORED);
 	}
 
 	usercmd_t* cmd = &ppmove->cmd;
+	edict_t* plr = INDEXENT(ppmove->player_index + 1);
 	PlayerDat& dat = playerDat[ppmove->player_index];
 	uint64_t now = getEpochMillis();
 
@@ -208,18 +276,29 @@ void PM_Move(struct playermove_s* ppmove, int server) {
 
 	// debug info
 	/*
-	edict_t* plr = INDEXENT(ppmove->player_index+1);
 	//if (TimeDifference(dat.lastCorrection, now) < 0.5f)
 	println("[AntiCheat] %s: error=%d (+/-%d), msec=%d, hack=%s", STRING(plr->v.netname), error, maxErrorMs, (int)cmd->msec, hackState);
 	*/
 
 	log_speedhack(dat, now, ppmove->player_index);
 
+	if (dat.speedhackState != SPEEDHACK_FAST) {
+		kill_jumpbug_cheaters_phase1(ppmove, plr, dat);
+	}
+
 	if (dat.speedhackState == SPEEDHACK_FAST) {
 		// prevent movement speedhack
 		RETURN_META(MRES_SUPERCEDE);
 	}
 
+	RETURN_META(MRES_IGNORED);
+}
+
+void PM_Move_post(struct playermove_s* ppmove, int server) {
+	edict_t* plr = INDEXENT(ppmove->player_index + 1);
+	PlayerDat& dat = playerDat[ppmove->player_index];
+
+	kill_jumpbug_cheaters_phase2(ppmove, plr, dat);
 	RETURN_META(MRES_IGNORED);
 }
 

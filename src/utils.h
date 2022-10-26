@@ -10,6 +10,8 @@ edict_t* getPlayerByUserId(int id);
 
 const char* getPlayerUniqueId(edict_t* plr);
 
+bool isPlayerAlive(edict_t* plr);
+
 bool isValidPlayer(edict_t* plr);
 
 void clientCommand(edict_t* plr, string cmd, int destType = MSG_ONE);
