@@ -15,6 +15,11 @@ const char* getPlayerUniqueId(edict_t* plr) {
 	return steamId;
 }
 
+bool isPlayerAlive(edict_t* plr) {
+	return (plr->v.deadflag == DEAD_NO) && plr->v.health > 0;
+}
+
+
 string replaceString(string subject, string search, string replace)
 {
 	size_t pos = 0;
