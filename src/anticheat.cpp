@@ -32,22 +32,32 @@ enum speedhack_states {
 };
 
 struct PlayerDat {
+	int speedhackState = SPEEDHACK_NOT;
 	uint64_t lastCmd;
+
+	// speedhack state
 	uint64_t msecTime; // time accumulated by the msec value in each Cmd
 	uint64_t lastCorrection; // last time player was rubber-banded to prevent speedhack
-	uint64_t slowhackStart; // time slow speedhack started, 0 for not hacking
+	uint64_t slowhackStart; // time slow speedhack started, 0 = normal speed resumed
 
+	// log info
 	uint64_t lastLogEvent; // last time a speedhack was logged
 	uint64_t detectStartTime; // time first speed/slowhack was detected, since last logging
 	int fastDetections; // number of speedup millis since last logging - used to indicate hack severity.
 	int slowDetections; // number of slowdown detections
 
+	// jumpbug state
 	bool jumpOrDuckButtonsChanged;
 	bool jumpedInstantlyAfterLanding;
 	float lastHealth;
 	float lastVelocityZ; // for jumpbug detection
 
-	int speedhackState = SPEEDHACK_NOT;
+	// debug command info
+	int debugTarget; // >0 if debugging player network
+	uint32_t lastDebugPacketCount;
+	uint32_t packetCount;
+	uint64_t lastFpsCalc;
+	float lastDebugFps;
 };
 
 PlayerDat playerDat[32];
@@ -56,7 +66,7 @@ uint64_t lastDriftCorrection = 0;
 
 cvar_t* g_maxErrorSeconds;
 cvar_t* g_jumpbugCheck;
-bool g_enabled = true;
+cvar_t* g_enabled;
 
 void PluginInit() {
 	// Total milliseconds of command packets that clients can send instantly after a lag spike.
@@ -71,6 +81,8 @@ void PluginInit() {
 	// enables jumpbug checks
 	g_jumpbugCheck = RegisterCVar("anticheat.jumpbug", "1", 1, 0);
 
+	g_enabled = RegisterCVar("anticheat.enable", "1", 1, 0);
+
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
 	g_dll_hooks.pfnClientPutInServer = ClientJoin;
@@ -80,6 +92,7 @@ void PluginInit() {
 	g_dll_hooks_post.pfnPlayerPostThink = PlayerPostThink_post;
 	g_dll_hooks.pfnPM_Move = PM_Move;
 	g_dll_hooks_post.pfnPM_Move = PM_Move_post;
+	g_dll_hooks.pfnClientCommand = ClientCommand;
 }
 
 void PluginExit() {}
@@ -94,6 +107,107 @@ void ClientJoin(edict_t* plr) {
 	memset(&playerDat[idx], 0, sizeof(PlayerDat));
 
 	RETURN_META(MRES_IGNORED);
+}
+
+void check_debuggers() {
+	for (int i = 1; i <= gpGlobals->maxClients; i++) {
+		edict_t* plr = INDEXENT(i);
+
+		if (!isValidPlayer(plr)) {
+			continue;
+		}
+
+		PlayerDat& dat = playerDat[i-1];
+
+		if (dat.debugTarget == 0) {
+			continue;
+		}
+
+		edict_t* target = INDEXENT(dat.debugTarget);
+		if (!isValidPlayer(target)) {
+			dat.debugTarget = 0;
+			continue;
+		}
+		PlayerDat& tdat = playerDat[dat.debugTarget-1];
+		string name = STRING(target->v.netname);
+		name = name.substr(0, 16);
+
+		//int error = tdat.lastError;
+		uint64_t now = getEpochMillis();
+		int error = TimeDifference(now, tdat.msecTime) * 1000.0f;
+		int maxErrorMs = g_maxErrorSeconds->value / 2;
+
+		float fpsTime = 1.0f;
+		if (TimeDifference(dat.lastFpsCalc, now) > fpsTime) {
+			dat.lastDebugFps = ((float)(tdat.packetCount - dat.lastDebugPacketCount) / fpsTime);
+			dat.lastDebugPacketCount = tdat.packetCount;
+			dat.lastFpsCalc = now;
+		}
+
+		bool isLagging = TimeDifference(tdat.lastCmd, now) > 0.1f;
+
+		hudtextparms_t params = { 0 };
+		params.effect = 0;
+		params.fadeinTime = 0;
+		params.fadeoutTime = 0.5f;
+		params.holdTime = 1.0f;
+		params.r1 = 255;
+		params.g1 = isLagging ? 64 : 255;
+		params.b1 = isLagging ? 64 : 255;
+
+		params.x = 0.3;
+		params.y = 0.4;
+		params.channel = 2;
+
+		string bar = "[                    ]";
+
+		int bars = ((float)error / (float)maxErrorMs) * 10.0f;
+		bars = clamp(bars, -10, 10);
+		bar[11 + bars] = '0';
+
+		if (tdat.fastDetections > 0) {
+			bar += UTIL_VarArgs(" +%dms", tdat.fastDetections);
+		}
+		else if (tdat.slowDetections > 0) {
+			bar += UTIL_VarArgs(" -%dms", tdat.slowDetections);
+		}
+
+		HudMessage(plr, params, UTIL_VarArgs("%s\n%s\n%d FPS    (%03d)", name.c_str(), bar.c_str(), (int)dat.lastDebugFps, tdat.packetCount % 1000), MSG_ONE_UNRELIABLE);
+	}
+}
+
+bool doCommand(edict_t* plr) {
+	bool isAdmin = AdminLevel(plr) >= ADMIN_YES;
+	PlayerDat& dat = playerDat[ENTINDEX(plr) - 1];
+	CommandArgs args = CommandArgs();
+	string lowerArg = toLowerCase(args.ArgV(0));
+
+	if (args.ArgC() > 0 && lowerArg == ".ac") {
+		dat.debugTarget = 0;
+
+		if (args.ArgC() > 1) {
+			edict_t* target = getPlayerByName(plr, args.ArgV(1));
+
+			if (target) {
+				dat.lastDebugFps = 0;
+				dat.debugTarget = ENTINDEX(target);
+				dat.lastDebugPacketCount = playerDat[dat.debugTarget-1].packetCount;
+				ClientPrint(plr, HUD_PRINTTALK, UTIL_VarArgs("Debugging network for \"%s\"", STRING(target->v.netname)));
+			}
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
+void ClientCommand(edict_t* pEntity) {
+	META_RES ret = doCommand(pEntity) ? MRES_SUPERCEDE : MRES_IGNORED;
+
+	//logClientCommand(pEntity);
+
+	RETURN_META(ret);
 }
 
 void log_speedhack(PlayerDat& dat, uint64_t now, int player_index) {
@@ -173,7 +287,7 @@ void kill_jumpbug_cheaters_phase3(edict_t* plr, PlayerDat& dat) {
 }
 
 void PlayerPreThink(edict_t* plr) {
-	if (g_enabled && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
+	if (g_enabled->value > 0 && g_maxErrorSeconds->value > 0 && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
 		// not sure what this prevents but better safe than sorry
 		RETURN_META(MRES_SUPERCEDE);
 	}
@@ -182,7 +296,7 @@ void PlayerPreThink(edict_t* plr) {
 }
 
 void PlayerPostThink(edict_t* plr) {
-	if (g_enabled && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
+	if (g_enabled->value > 0 && g_maxErrorSeconds->value > 0 && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
 		// prevent weapon speedhack
 		RETURN_META(MRES_SUPERCEDE);
 	}
@@ -198,7 +312,7 @@ void PlayerPostThink_post(edict_t* plr) {
 }
 
 void PM_Move(playermove_s* ppmove, int server) {
-	if (!g_enabled) {
+	if (g_maxErrorSeconds->value == 0) {
 		RETURN_META(MRES_IGNORED);
 	}
 
@@ -238,7 +352,6 @@ void PM_Move(playermove_s* ppmove, int server) {
 		uint64_t windowMin = now - (uint64_t)maxErrorMs;// shift time just enough to be within the window of acceptable clock differences
 		float diff2 = TimeDifference(dat.msecTime, windowMin);
 
-		error = TimeDifference(now, dat.msecTime)*1000.0f;
 		hackState = "slow (could be lag)";
 
 		if (dat.slowhackStart == 0) {
@@ -252,7 +365,9 @@ void PM_Move(playermove_s* ppmove, int server) {
 
 			// this command will be extended so that the player moves faster
 			dat.msecTime -= cmd->msec;
-			cmd->msec = min(255, (int)(diff2 * 1000));
+			if (g_enabled->value > 0) {
+				cmd->msec = min(255, (int)(diff2 * 1000));
+			}
 			dat.msecTime += cmd->msec;
 
 			dat.speedhackState = SPEEDHACK_SLOW;
@@ -273,6 +388,7 @@ void PM_Move(playermove_s* ppmove, int server) {
 
 	float timeSinceLastPacket = TimeDifference(dat.lastCmd, getEpochMillis());
 	dat.lastCmd = now;
+	dat.packetCount++;
 
 	// debug info
 	/*
@@ -280,13 +396,13 @@ void PM_Move(playermove_s* ppmove, int server) {
 	println("[AntiCheat] %s: error=%d (+/-%d), msec=%d, hack=%s", STRING(plr->v.netname), error, maxErrorMs, (int)cmd->msec, hackState);
 	*/
 
-	log_speedhack(dat, now, ppmove->player_index);
+	log_speedhack(dat, now, ppmove->player_index);	
 
 	if (dat.speedhackState != SPEEDHACK_FAST) {
 		kill_jumpbug_cheaters_phase1(ppmove, plr, dat);
 	}
 
-	if (dat.speedhackState == SPEEDHACK_FAST) {
+	if (g_enabled->value > 0 && dat.speedhackState == SPEEDHACK_FAST) {
 		// prevent movement speedhack
 		RETURN_META(MRES_SUPERCEDE);
 	}
@@ -322,7 +438,7 @@ uint64_t lastCheck = 0;
 int checkType = 0;
 
 void StartFrame() {
-	g_enabled = g_maxErrorSeconds->value > 0;
+	check_debuggers();
 
 	uint64_t now = getEpochMillis();
 	if (TimeDifference(lastCheck, now) < 60.0f) {
