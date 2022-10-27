@@ -10,6 +10,8 @@ edict_t* getPlayerByUserId(int id);
 
 const char* getPlayerUniqueId(edict_t* plr);
 
+edict_t* getPlayerByName(edict_t* caller, string name);
+
 bool isPlayerAlive(edict_t* plr);
 
 bool isValidPlayer(edict_t* plr);
@@ -25,3 +27,7 @@ string formatTime(int totalSeconds);
 vector<string> splitString(string str, const char* delimitters);
 
 uint32_t getFileSize(FILE* file);
+
+float clampf(float val, float min, float max);
+
+int clamp(int val, int min, int max);
