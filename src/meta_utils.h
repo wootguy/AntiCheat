@@ -15,7 +15,7 @@ using namespace std; // ohhh yesss
 #define PLAYER_BIT(edt) (1 << (ENTINDEX(edt) % 32))
 
 #define print(fmt,...) {ALERT(at_console, (char*)string(fmt).c_str(), ##__VA_ARGS__);}
-#define println(fmt,...) {ALERT(at_console, (char*)string(fmt).c_str(), ##__VA_ARGS__); ALERT(at_console, "\n"); }
+#define println(fmt,...) {ALERT(at_console, (char*)(string(fmt) + "\n").c_str(), ##__VA_ARGS__); }
 
 #define log(fmt, ...) {ALERT(at_logged, (char*)string(fmt).c_str(), ##__VA_ARGS__);}
 #define logln(fmt,...) {ALERT(at_logged, (char*)(string(fmt) + "\n").c_str(), ##__VA_ARGS__); }

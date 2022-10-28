@@ -4,6 +4,16 @@
 #include "eiface.h"
 #include "utils.h"
 #include <algorithm>
+#include <set>
+
+// TODO: cameras stop PM_Move calls, false slowhack
+
+// abnormal connections:
+// greetins = often corrected at 300ms, but less than the disconnect beep
+// dj cheb = 50-100ms flucuations normally
+// saiko = 250ms+ fluctuations normally
+// most false positives come from people alt-tabbing or not having the game in focus
+
 
 using namespace std;
 
@@ -67,6 +77,9 @@ uint64_t lastDriftCorrection = 0;
 cvar_t* g_maxErrorSeconds;
 cvar_t* g_jumpbugCheck;
 cvar_t* g_enabled;
+cvar_t* g_log_commands;
+
+set<string> g_cmd_log_filter;
 
 void PluginInit() {
 	// Total milliseconds of command packets that clients can send instantly after a lag spike.
@@ -83,6 +96,9 @@ void PluginInit() {
 
 	g_enabled = RegisterCVar("anticheat.enable", "1", 1, 0);
 
+	// logs all client commands. Used to find out if something is being abused to cause lag or smth
+	g_log_commands = RegisterCVar("anticheat.logcmd", "0", 0, 0);
+
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
 	g_dll_hooks.pfnClientPutInServer = ClientJoin;
@@ -93,6 +109,20 @@ void PluginInit() {
 	g_dll_hooks.pfnPM_Move = PM_Move;
 	g_dll_hooks_post.pfnPM_Move = PM_Move_post;
 	g_dll_hooks.pfnClientCommand = ClientCommand;
+
+	g_cmd_log_filter.insert("say");
+	g_cmd_log_filter.insert("gibme");
+	g_cmd_log_filter.insert("kill");
+	g_cmd_log_filter.insert("drop");
+	g_cmd_log_filter.insert("dropammo");
+	g_cmd_log_filter.insert("dropsecammo");
+	g_cmd_log_filter.insert("medic");
+	g_cmd_log_filter.insert("grenade");
+	g_cmd_log_filter.insert("npc_findcover");
+	g_cmd_log_filter.insert("lastinv");
+	g_cmd_log_filter.insert("vmodenable");
+	g_cmd_log_filter.insert("vban");
+	g_cmd_log_filter.insert("as_menuselect");
 }
 
 void PluginExit() {}
@@ -130,7 +160,7 @@ void check_debuggers() {
 		}
 		PlayerDat& tdat = playerDat[dat.debugTarget-1];
 		string name = STRING(target->v.netname);
-		name = name.substr(0, 16);
+		name = name.substr(0, 14);
 
 		//int error = tdat.lastError;
 		uint64_t now = getEpochMillis();
@@ -165,7 +195,10 @@ void check_debuggers() {
 		bars = clamp(bars, -10, 10);
 		bar[11 + bars] = '0';
 
-		if (tdat.fastDetections > 0) {
+		if (target->v.flags & FL_FROZEN) {
+			bar += UTIL_VarArgs(" FL_FROZEN", tdat.fastDetections);
+		}
+		else if (tdat.fastDetections > 0) {
 			bar += UTIL_VarArgs(" +%dms", tdat.fastDetections);
 		}
 		else if (tdat.slowDetections > 0) {
@@ -202,10 +235,34 @@ bool doCommand(edict_t* plr) {
 	return false;
 }
 
+void logClientCommand(edict_t* plr) {
+	string command = CMD_ARGV(0);
+
+	for (int i = 1; i < CMD_ARGC(); i++) {
+		command += string(" ") + CMD_ARGV(i);
+	}
+
+	if (g_log_commands->value < 2) {
+		string cmd = toLowerCase(CMD_ARGV(0));
+
+		if (g_cmd_log_filter.find(cmd) != g_cmd_log_filter.end()) {
+			return;
+		}
+		if (cmd.find("weapon_") == 0) {
+			return;
+		}
+	}
+
+	const char* steamid = getPlayerUniqueId(plr);
+	logln("[Cmd][%s][%s] %s", steamid, STRING(plr->v.netname), command.c_str());
+}
+
 void ClientCommand(edict_t* pEntity) {
 	META_RES ret = doCommand(pEntity) ? MRES_SUPERCEDE : MRES_IGNORED;
 
-	//logClientCommand(pEntity);
+	if (g_log_commands->value > 0) {
+		logClientCommand(pEntity);
+	}
 
 	RETURN_META(ret);
 }
@@ -227,8 +284,11 @@ void log_speedhack(PlayerDat& dat, uint64_t now, int player_index) {
 			const char* steamid = getPlayerUniqueId(plr);
 			float duration = TimeDifference(dat.detectStartTime, dat.lastCorrection);
 
-			logln("[AntiCheat] Speedhack on %s (%s): time=%.1fs, speedup=%dms, slowdown=%dms",
-				STRING(plr->v.netname), steamid, duration, dat.fastDetections, dat.slowDetections);
+			// not calling it a speedhack because lag spikes trigger this too
+			logln("[AntiCheat] Throttled %s (%s) by %dms over %.2fs", 
+				STRING(plr->v.netname), steamid,
+				dat.fastDetections > 0 ? dat.fastDetections : -dat.slowDetections,
+				duration);
 
 			dat.fastDetections = 0;
 			dat.slowDetections = 0;
@@ -272,16 +332,20 @@ void kill_jumpbug_cheaters_phase3(edict_t* plr, PlayerDat& dat) {
 
 		// touching or slightly above ground?
 		if (tr.flFraction < 1.0f && !launchingOffRamp) {
+			logln("[AntiCheat] begin jumpbug kill code");
 			const char* steamid = getPlayerUniqueId(plr);
 			Vector origin = plr->v.origin;
 
-			if (g_jumpbugCheck->value != 0) {
-				ClientPrintAll(HUD_PRINTNOTIFY, UTIL_VarArgs("[AntiCheat] %s was killed for using the jumpbug cheat.\n", STRING(plr->v.netname)));
-				gpGamedllFuncs->dllapi_table->pfnClientKill(plr);
-			}
-
 			logln("[AntiCheat] Jumpbug on %s (%s): map=%s, origin=%d %d %d",
-				STRING(plr->v.netname), steamid, gpGlobals->mapname, (int)origin.x, (int)origin.y, (int)origin.z);
+				STRING(plr->v.netname), steamid, STRING(gpGlobals->mapname), (int)origin.x, (int)origin.y, (int)origin.z);
+
+			if (g_jumpbugCheck->value != 0) {
+				logln("[AntiCheat] jumpbug message code");
+				ClientPrintAll(HUD_PRINTNOTIFY, UTIL_VarArgs("[AntiCheat] %s was killed for using the jumpbug cheat.\n", STRING(plr->v.netname)));
+				logln("[AntiCheat] jumpbug kill code");
+				gpGamedllFuncs->dllapi_table->pfnClientKill(plr);
+				logln("[AntiCheat] jumpbug kill done");
+			}
 		}
 	}
 }
@@ -320,6 +384,13 @@ void PM_Move(playermove_s* ppmove, int server) {
 	edict_t* plr = INDEXENT(ppmove->player_index + 1);
 	PlayerDat& dat = playerDat[ppmove->player_index];
 	uint64_t now = getEpochMillis();
+
+	if (plr->v.flags & FL_FROZEN) {
+		// frozen players don't send normal command packets
+		dat.msecTime = now;
+		dat.speedhackState = SPEEDHACK_NOT;
+		RETURN_META(MRES_IGNORED);
+	}
 
 	if (dat.msecTime == 0) {
 		// start tracking a newly joined player
