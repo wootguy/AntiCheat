@@ -198,3 +198,4 @@ void StartFrame();
 void CvarValue2(const edict_t* pEnt, int requestID, const char* cvarName, const char* value);
 void ClientCommand(edict_t* pEntity);
 void loadSpeedhackWhitelist();
+void loadLogFilter();
