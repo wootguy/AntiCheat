@@ -81,7 +81,8 @@ cvar_t* g_jumpbugCheck;
 cvar_t* g_enabled;
 cvar_t* g_log_commands;
 
-#define SPEEDHACK_WHITELIST_FILE "speedhack_whitelist.txt"
+#define SPEEDHACK_WHITELIST_FILE "anticheat_speedhack_whitelist.txt"
+#define COMMAND_FILTER_FILE "anticheat_command_filter.txt"
 
 set<string> g_cmd_log_filter;
 set<string> g_speedhack_whitelist; // list of players who have utterly shit connections, who you trust are not speedhackers
@@ -115,22 +116,8 @@ void PluginInit() {
 	g_dll_hooks_post.pfnPM_Move = PM_Move_post;
 	g_dll_hooks.pfnClientCommand = ClientCommand;
 
-	g_cmd_log_filter.insert("say");
-	g_cmd_log_filter.insert("gibme");
-	g_cmd_log_filter.insert("kill");
-	g_cmd_log_filter.insert("drop");
-	g_cmd_log_filter.insert("dropammo");
-	g_cmd_log_filter.insert("dropsecammo");
-	g_cmd_log_filter.insert("medic");
-	g_cmd_log_filter.insert("grenade");
-	g_cmd_log_filter.insert("npc_findcover");
-	g_cmd_log_filter.insert("npc_moveto");
-	g_cmd_log_filter.insert("lastinv");
-	g_cmd_log_filter.insert("vmodenable");
-	g_cmd_log_filter.insert("vban");
-	g_cmd_log_filter.insert("as_menuselect");
-
 	loadSpeedhackWhitelist();
+	loadLogFilter();
 }
 
 void PluginExit() {}
@@ -160,12 +147,43 @@ void loadSpeedhackWhitelist() {
 			continue;
 		}
 
-		println("ADD ID '%s'", steamId.c_str());
-
 		g_speedhack_whitelist.insert(steamId);
 	}
 
 	println(UTIL_VarArgs("[AntiCheat] Loaded %d steam ids from whitelist file", g_speedhack_whitelist.size()));
+
+	fclose(file);
+}
+
+void loadLogFilter() {
+	g_speedhack_whitelist.clear();
+	FILE* file = fopen(COMMAND_FILTER_FILE, "r");
+
+	if (!file) {
+		string text = string("[AntiCheat] Failed to open: ") + COMMAND_FILTER_FILE + "\n";
+		println(text);
+		logln(text);
+		return;
+	}
+
+	string line;
+	while (cgetline(file, line)) {
+		if (line.empty()) {
+			continue;
+		}
+
+		// strip comments
+		int endPos = line.find_first_of(" \t#/\n");
+		string command = toLowerCase(trimSpaces(line.substr(0, endPos)));
+
+		if (command.length() < 1) {
+			continue;
+		}
+
+		g_cmd_log_filter.insert(command);
+	}
+
+	println(UTIL_VarArgs("[AntiCheat] Loaded %d commands from filter file", g_cmd_log_filter.size()));
 
 	fclose(file);
 }
