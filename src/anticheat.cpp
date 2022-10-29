@@ -13,7 +13,7 @@
 // dj cheb = 50-100ms flucuations normally
 // saiko = 250ms+ fluctuations normally
 // most false positives come from people alt-tabbing or not having the game in focus
-
+// Filich (STEAM_0:1:184079051) = regularly throttles 300ms+, sometimes up to 1-2 seconds!
 
 using namespace std;
 
@@ -68,6 +68,8 @@ struct PlayerDat {
 	uint32_t packetCount;
 	uint64_t lastFpsCalc;
 	float lastDebugFps;
+
+	bool isTrustedPlayer; // don't do speedhack corrections for this player if true
 };
 
 PlayerDat playerDat[32];
@@ -79,7 +81,10 @@ cvar_t* g_jumpbugCheck;
 cvar_t* g_enabled;
 cvar_t* g_log_commands;
 
+#define SPEEDHACK_WHITELIST_FILE "speedhack_whitelist.txt"
+
 set<string> g_cmd_log_filter;
+set<string> g_speedhack_whitelist; // list of players who have utterly shit connections, who you trust are not speedhackers
 
 void PluginInit() {
 	// Total milliseconds of command packets that clients can send instantly after a lag spike.
@@ -119,22 +124,67 @@ void PluginInit() {
 	g_cmd_log_filter.insert("medic");
 	g_cmd_log_filter.insert("grenade");
 	g_cmd_log_filter.insert("npc_findcover");
+	g_cmd_log_filter.insert("npc_moveto");
 	g_cmd_log_filter.insert("lastinv");
 	g_cmd_log_filter.insert("vmodenable");
 	g_cmd_log_filter.insert("vban");
 	g_cmd_log_filter.insert("as_menuselect");
+
+	loadSpeedhackWhitelist();
 }
 
 void PluginExit() {}
 
+void loadSpeedhackWhitelist() {
+	g_speedhack_whitelist.clear();
+	FILE* file = fopen(SPEEDHACK_WHITELIST_FILE, "r");
+
+	if (!file) {
+		string text = string("[AntiCheat] Failed to open: ") + SPEEDHACK_WHITELIST_FILE + "\n";
+		println(text);
+		logln(text);
+		return;
+	}
+
+	string line;
+	while (cgetline(file, line)) {
+		if (line.empty()) {
+			continue;
+		}
+
+		// strip comments
+		int endPos = line.find_first_of(" \t#/\n");
+		string steamId = toLowerCase(trimSpaces(line.substr(0, endPos)));
+
+		if (steamId.length() < 1) {
+			continue;
+		}
+
+		println("ADD ID '%s'", steamId.c_str());
+
+		g_speedhack_whitelist.insert(steamId);
+	}
+
+	println(UTIL_VarArgs("[AntiCheat] Loaded %d steam ids from whitelist file", g_speedhack_whitelist.size()));
+
+	fclose(file);
+}
+
 void MapInit(edict_t* pEdictList, int edictCount, int clientMax) {
 	memset(playerDat, 0, sizeof(PlayerDat) * 32);
+
+	loadSpeedhackWhitelist();
+
 	RETURN_META(MRES_IGNORED);
 }
 
 void ClientJoin(edict_t* plr) {
 	int idx = ENTINDEX(plr) - 1;
 	memset(&playerDat[idx], 0, sizeof(PlayerDat));
+
+	string steamid = toLowerCase(getPlayerUniqueId(plr));
+	playerDat[idx].isTrustedPlayer =
+		g_speedhack_whitelist.find(steamid) != g_speedhack_whitelist.end();
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -184,6 +234,10 @@ void check_debuggers() {
 		params.r1 = 255;
 		params.g1 = isLagging ? 64 : 255;
 		params.b1 = isLagging ? 64 : 255;
+
+		if (tdat.isTrustedPlayer && !isLagging) {
+			params.r1 = 0;
+		}
 
 		params.x = 0.3;
 		params.y = 0.4;
@@ -284,11 +338,14 @@ void log_speedhack(PlayerDat& dat, uint64_t now, int player_index) {
 			const char* steamid = getPlayerUniqueId(plr);
 			float duration = TimeDifference(dat.detectStartTime, dat.lastCorrection);
 
-			// not calling it a speedhack because lag spikes trigger this too
-			logln("[AntiCheat] Throttled %s (%s) by %dms over %.2fs", 
-				STRING(plr->v.netname), steamid,
-				dat.fastDetections > 0 ? dat.fastDetections : -dat.slowDetections,
-				duration);
+			if (!dat.isTrustedPlayer) {
+				// not calling it a speedhack because lag spikes trigger this too
+				logln("[AntiCheat] Throttled %s (%s) by %dms over %.2fs",
+					STRING(plr->v.netname), steamid,
+					dat.fastDetections > 0 ? dat.fastDetections : -dat.slowDetections,
+					duration);
+			}
+			
 
 			dat.fastDetections = 0;
 			dat.slowDetections = 0;
@@ -332,7 +389,6 @@ void kill_jumpbug_cheaters_phase3(edict_t* plr, PlayerDat& dat) {
 
 		// touching or slightly above ground?
 		if (tr.flFraction < 1.0f && !launchingOffRamp) {
-			logln("[AntiCheat] begin jumpbug kill code");
 			const char* steamid = getPlayerUniqueId(plr);
 			Vector origin = plr->v.origin;
 
@@ -340,11 +396,8 @@ void kill_jumpbug_cheaters_phase3(edict_t* plr, PlayerDat& dat) {
 				STRING(plr->v.netname), steamid, STRING(gpGlobals->mapname), (int)origin.x, (int)origin.y, (int)origin.z);
 
 			if (g_jumpbugCheck->value != 0) {
-				logln("[AntiCheat] jumpbug message code");
 				ClientPrintAll(HUD_PRINTNOTIFY, UTIL_VarArgs("[AntiCheat] %s was killed for using the jumpbug cheat.\n", STRING(plr->v.netname)));
-				logln("[AntiCheat] jumpbug kill code");
 				gpGamedllFuncs->dllapi_table->pfnClientKill(plr);
-				logln("[AntiCheat] jumpbug kill done");
 			}
 		}
 	}
@@ -400,6 +453,8 @@ void PM_Move(playermove_s* ppmove, int server) {
 
 	// accumulate time from command packets. Ideally it adds up to equal the server time.
 	dat.msecTime += cmd->msec;
+
+	byte oldMsec = cmd->msec;
 
 	// how far off is the client's clock from the server's clock?
 	int error = TimeDifference(now, dat.msecTime) * 1000.0f;
@@ -471,6 +526,13 @@ void PM_Move(playermove_s* ppmove, int server) {
 
 	if (dat.speedhackState != SPEEDHACK_FAST) {
 		kill_jumpbug_cheaters_phase1(ppmove, plr, dat);
+	}
+
+	if (dat.isTrustedPlayer) {
+		// don't throttle trusted players
+		cmd->msec = oldMsec;
+		dat.speedhackState = SPEEDHACK_NOT;
+		RETURN_META(MRES_IGNORED);
 	}
 
 	if (g_enabled->value > 0 && dat.speedhackState == SPEEDHACK_FAST) {

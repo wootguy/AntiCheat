@@ -171,8 +171,6 @@ void LoadAdminList() {
 		return;
 	}
 
-	int channelList = -1;
-	int loadedStates = 0;
 	string line;
 	while (cgetline(file, line)) {
 		if (line.empty()) {
@@ -196,8 +194,6 @@ void LoadAdminList() {
 
 		g_admins[steamId] = adminLevel;
 	}
-
-	println(UTIL_VarArgs("[Radio] Loaded %d states from file", loadedStates));
 
 	fclose(file);
 }
