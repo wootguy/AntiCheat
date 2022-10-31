@@ -9,11 +9,8 @@
 // TODO: cameras stop PM_Move calls, false slowhack
 
 // abnormal connections:
-// greetins = often corrected at 300ms, but less than the disconnect beep
 // dj cheb = 50-100ms flucuations normally
-// saiko = 250ms+ fluctuations normally
 // most false positives come from people alt-tabbing or not having the game in focus
-// Filich (STEAM_0:1:184079051) = regularly throttles 300ms+, sometimes up to 1-2 seconds!
 
 using namespace std;
 
@@ -80,6 +77,7 @@ cvar_t* g_maxErrorSeconds;
 cvar_t* g_jumpbugCheck;
 cvar_t* g_enabled;
 cvar_t* g_log_commands;
+cvar_t* g_min_throttle_ms_log;
 
 #define SPEEDHACK_WHITELIST_FILE "anticheat_speedhack_whitelist.txt"
 #define COMMAND_FILTER_FILE "anticheat_command_filter.txt"
@@ -104,6 +102,9 @@ void PluginInit() {
 
 	// logs all client commands. Used to find out if something is being abused to cause lag or smth
 	g_log_commands = RegisterCVar("anticheat.logcmd", "0", 0, 0);
+
+	// don't log if throttle time is less than this
+	g_min_throttle_ms_log = RegisterCVar("anticheat.minthrottlemslog", "50", 50, 0);
 
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
@@ -316,12 +317,21 @@ void logClientCommand(edict_t* plr) {
 
 	if (g_log_commands->value < 2) {
 		string cmd = toLowerCase(CMD_ARGV(0));
+		string arg = CMD_ARGC() > 1 ? toLowerCase(CMD_ARGV(1)) : "";
 
 		if (g_cmd_log_filter.find(cmd) != g_cmd_log_filter.end()) {
 			return;
 		}
 		if (cmd.find("weapon_") == 0) {
 			return;
+		}
+		if (cmd == "say") {
+			if (!arg.length() > 0 && arg[0] != '.') {
+				return; // not a plugin command, probably
+			}
+			if (arg.length() && g_cmd_log_filter.find(arg) != g_cmd_log_filter.end()) {
+				return; // filtered command that can be typed in chat
+			}
 		}
 	}
 
@@ -355,15 +365,13 @@ void log_speedhack(PlayerDat& dat, uint64_t now, int player_index) {
 			edict_t* plr = INDEXENT(player_index + 1);
 			const char* steamid = getPlayerUniqueId(plr);
 			float duration = TimeDifference(dat.detectStartTime, dat.lastCorrection);
+			int throttleMs = dat.fastDetections > 0 ? dat.fastDetections : -dat.slowDetections;
 
-			if (!dat.isTrustedPlayer) {
+			if (!dat.isTrustedPlayer && abs(throttleMs) > g_min_throttle_ms_log->value) {
 				// not calling it a speedhack because lag spikes trigger this too
 				logln("[AntiCheat] Throttled %s (%s) by %dms over %.2fs",
-					STRING(plr->v.netname), steamid,
-					dat.fastDetections > 0 ? dat.fastDetections : -dat.slowDetections,
-					duration);
+					STRING(plr->v.netname), steamid, throttleMs, duration);
 			}
-			
 
 			dat.fastDetections = 0;
 			dat.slowDetections = 0;
