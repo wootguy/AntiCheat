@@ -78,6 +78,7 @@ cvar_t* g_jumpbugCheck;
 cvar_t* g_enabled;
 cvar_t* g_log_commands;
 cvar_t* g_min_throttle_ms_log;
+cvar_t* g_cheat_client_check;
 
 #define SPEEDHACK_WHITELIST_FILE "anticheat_speedhack_whitelist.txt"
 #define COMMAND_FILTER_FILE "anticheat_command_filter.txt"
@@ -105,6 +106,9 @@ void PluginInit() {
 
 	// don't log if throttle time is less than this
 	g_min_throttle_ms_log = RegisterCVar("anticheat.minthrottlemslog", "50", 50, 0);
+
+	// enables check for special cvars defined in cheat clients
+	g_cheat_client_check = RegisterCVar("anticheat.cheatclientcheck", "1", 1, 0);
 
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
@@ -325,8 +329,11 @@ void logClientCommand(edict_t* plr) {
 		if (cmd.find("weapon_") == 0) {
 			return;
 		}
+		if (cmd.find("cam_mouse_") == 0) {
+			return;
+		}
 		if (cmd == "say") {
-			if (!arg.length() > 0 && arg[0] != '.') {
+			if (!arg.length() || arg[0] != '.') {
 				return; // not a plugin command, probably
 			}
 			if (arg.length() && g_cmd_log_filter.find(arg) != g_cmd_log_filter.end()) {
@@ -598,6 +605,10 @@ int checkType = 0;
 
 void StartFrame() {
 	check_debuggers();
+	
+	if (g_cheat_client_check->value <= 0) {
+		return;
+	}
 
 	uint64_t now = getEpochMillis();
 	if (TimeDifference(lastCheck, now) < 60.0f) {
