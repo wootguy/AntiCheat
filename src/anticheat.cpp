@@ -46,6 +46,7 @@ struct PlayerDat {
 	uint64_t msecTime; // time accumulated by the msec value in each Cmd
 	uint64_t lastCorrection; // last time player was rubber-banded to prevent speedhack
 	uint64_t slowhackStart; // time slow speedhack started, 0 = normal speed resumed
+	uint64_t slowhackEnd; // reset slowhackStart some time after it ended
 
 	// log info
 	uint64_t lastLogEvent; // last time a speedhack was logged
@@ -482,6 +483,8 @@ void PM_Move(playermove_s* ppmove, int server) {
 		// start tracking a newly joined player
 		dat.msecTime = now;
 		dat.lastCmd = now;
+		dat.slowhackStart = 0;
+		dat.slowhackEnd = 0;
 	}	
 
 	// accumulate time from command packets. Ideally it adds up to equal the server time.
@@ -495,6 +498,8 @@ void PM_Move(playermove_s* ppmove, int server) {
 
 	const char* hackState = "none";
 
+	float timeSinceLastPacket = TimeDifference(dat.lastCmd, now);
+
 	if (error > maxErrorMs) {
 		// commands are faster than normal
 		dat.speedhackState = SPEEDHACK_FAST;
@@ -504,6 +509,7 @@ void PM_Move(playermove_s* ppmove, int server) {
 		dat.msecTime -= cmd->msec;
 		dat.lastCorrection = now;
 		dat.slowhackStart = 0;
+		dat.slowhackEnd = 0;
 		dat.fastDetections += cmd->msec;
 	}
 	else if (error < -maxErrorMs) {
@@ -517,7 +523,7 @@ void PM_Move(playermove_s* ppmove, int server) {
 			dat.slowhackStart = now;
 		}
 
-		if (TimeDifference(dat.slowhackStart, now)*1000 > maxErrorMs*2) {
+		if (TimeDifference(dat.slowhackStart, now)*1000 > maxErrorMs*2 && timeSinceLastPacket < 0.5f) {
 			// player is consistently moving too slow. Speed them up.
 			// The advantage you have with slow motion is delaying fall damage in survival mode
 			hackState = "SPEEDHACK SLOW";
@@ -542,10 +548,16 @@ void PM_Move(playermove_s* ppmove, int server) {
 	}
 	else {
 		dat.speedhackState = SPEEDHACK_NOT;
-		dat.slowhackStart = 0;
+
+		if (dat.slowhackStart && !dat.slowhackEnd) {
+			dat.slowhackEnd = now;
+		}
+		if (dat.slowhackStart && dat.slowhackEnd && TimeDifference(dat.slowhackEnd, now) > 1.0f) {
+			dat.slowhackStart = 0;
+			dat.slowhackEnd = 0;
+		}
 	}
 
-	float timeSinceLastPacket = TimeDifference(dat.lastCmd, getEpochMillis());
 	dat.lastCmd = now;
 	dat.packetCount++;
 
