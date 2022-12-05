@@ -31,7 +31,9 @@ The circle inside the bar represents the client's "clock" relative to the server
 A lot of throttling comes from people alt-tabbing out of the game. You can usually tell this happens when they stop moving and their FPS dips to ~30 or so.
 
 # Speedhack whitelist
-The `anticheat_speedhack_whitelist.txt` file lists players who have utterly shit connections and are constantly throttled by this plugin. Half-Life is very forgiving of connection issues and will let players queue many seconds of input commands while disconnected. The problem is that AntiCheat will stop compensating after 300ms or so (`antcheat.maxcmdprocessms` cvar), which means laggers get teleported back in time when they reconnect. A few small throttles per map is hardly noticeable but more than once per minute is going to ruin the game for some people.
+The `anticheat_speedhack_whitelist.txt` file lists Steam IDs to disable speedhack checks for. Trusted players with terrible connections should be added to this file.
+
+Half-Life is very forgiving of connection issues and will let players queue many seconds of input commands while disconnected. The problem is that AntiCheat will stop compensating after 300ms or so (`antcheat.maxcmdprocessms` cvar), which means laggers get teleported back in time when they reconnect. A few small throttles per map is hardly noticeable but more than once per minute is going to ruin the game for some people.
 
 Only add people to this file if you trust that they are not actually speedhacking. It should be obvious if they are regulars, or after analyzing their connection quality with the `.ac <player name>` command.
 
