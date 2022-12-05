@@ -596,6 +596,18 @@ void PM_Move_post(struct playermove_s* ppmove, int server) {
 	RETURN_META(MRES_IGNORED);
 }
 
+// send a message to the angelscript chat bridge plugin
+void RelaySay(string message) {
+	std::remove(message.begin(), message.end(), '\n'); // stip any newlines, ChatBridge.as takes care
+	replaceString(message, "\"", "'"); // replace quotes so cvar is set correctly
+
+	logln(string("[RelaySay ") + Plugin_info.name + "]: " + message + "\n");
+
+	g_engfuncs.pfnCVarSetString("relay_say_msg", message.c_str());
+	g_engfuncs.pfnServerCommand(UTIL_VarArgs("as_command .relay_say %s\n", Plugin_info.name));
+	g_engfuncs.pfnServerExecute();
+}
+
 void CvarValue2(const edict_t* pEnt, int requestID, const char* cvarName, const char* value) {
 	if (requestID != 1337 || value[0] == 'B') {
 		// "Bad CVAR request" or "Bad Player"
@@ -606,7 +618,10 @@ void CvarValue2(const edict_t* pEnt, int requestID, const char* cvarName, const 
 	logln("[AntiCheat_mm] %s: %s = %s", STRING(pEnt->v.netname), cvarName, value);
 
 	if (strcmp(cvarName, "sc_speedhack") == 0 || strcmp(cvarName, "sc_speedhack_ltfx") == 0) {
-		g_engfuncs.pfnServerCommand(UTIL_VarArgs("as_command anticheat.cheaterFound %d;", ENTINDEX(pEnt)));
+		int userid = (*g_engfuncs.pfnGetPlayerUserId)((edict_t*)pEnt);
+		g_engfuncs.pfnServerCommand(UTIL_VarArgs("kick #%d Disable your cheat mod.\n", userid));
+		ClientPrintAll(HUD_PRINTTALK, UTIL_VarArgs("[AntiCheat] %s was kicked for using cheat mods.\n", STRING(pEnt->v.netname)));
+		RelaySay(string(STRING(pEnt->v.netname)) + " was kicked for using cheat mods.");
 	}
 
 	RETURN_META(MRES_IGNORED);
@@ -630,6 +645,8 @@ void StartFrame() {
 	lastCheck = now;
 	checkType++;
 
+	// check if any clients have speedhack cvars defined.
+	// 100% confidence in cheater detection, but it is easily bypassed (especially now that the code is public).
 	for (int i = 1; i <= gpGlobals->maxClients; i++) {
 		edict_t* plr = INDEXENT(i);
 
