@@ -87,6 +87,51 @@ cvar_t* g_cheat_client_check;
 set<string> g_cmd_log_filter;
 set<string> g_speedhack_whitelist; // list of players who have utterly shit connections, who you trust are not speedhackers
 
+map<string, string> g_player_models;
+
+void ClientUserInfoChanged(edict_t* pEntity, char* infobuffer) {
+	vector<string> parts = splitString(infobuffer, "\\");
+	
+	if (!isValidPlayer(pEntity)) {
+		RETURN_META(MRES_IGNORED);
+	}
+
+	string steamid = getPlayerUniqueId(pEntity);
+	
+	string topcolor;
+	string bottomcolor;
+	string modelname;
+
+	for (int i = 0; i < parts.size()-1; i += 2) {
+		string key = parts[i];
+		string value = parts[i + 1];
+
+		if (key == "topcolor") {
+			topcolor = value;
+		}
+		else if (key == "bottomcolor") {
+			bottomcolor = value;
+		}
+		else if (key == "model") {
+			modelname = value;
+		}
+	}
+
+	string modelinfo = modelname + "\\" + topcolor + "\\" + bottomcolor;
+
+	if (g_player_models.find(steamid) != g_player_models.end() && g_player_models[steamid] == modelinfo) {
+		RETURN_META(MRES_IGNORED); // model info unchanged
+	}
+
+	g_player_models[steamid] = modelinfo;
+
+	char* msg = UTIL_VarArgs("[ModelInfo] %s\\%s\\%s", steamid.c_str(), modelinfo.c_str(), STRING(pEntity->v.netname));
+	//println("%s", msg); 
+	logln("%s", msg); // %s to prevent injection println interpreting %d or something in model name
+
+	RETURN_META(MRES_IGNORED);
+}
+
 void PluginInit() {
 	// Total milliseconds of command packets that clients can send instantly after a lag spike.
 	// This is also the max time a speedhacker can speed up or slow down movements before
@@ -121,6 +166,7 @@ void PluginInit() {
 	g_dll_hooks.pfnPM_Move = PM_Move;
 	g_dll_hooks_post.pfnPM_Move = PM_Move_post;
 	g_dll_hooks.pfnClientCommand = ClientCommand;
+	g_dll_hooks.pfnClientUserInfoChanged = ClientUserInfoChanged;
 
 	loadSpeedhackWhitelist();
 	loadLogFilter();
@@ -198,6 +244,7 @@ void MapInit(edict_t* pEdictList, int edictCount, int clientMax) {
 	memset(playerDat, 0, sizeof(PlayerDat) * 32);
 
 	loadSpeedhackWhitelist();
+	g_player_models.clear();
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -344,6 +391,7 @@ void logClientCommand(edict_t* plr) {
 	}
 
 	const char* steamid = getPlayerUniqueId(plr);
+	//println("[Cmd][%s][%s] %s", steamid, STRING(plr->v.netname), command.c_str());
 	logln("[Cmd][%s][%s] %s", steamid, STRING(plr->v.netname), command.c_str());
 }
 
