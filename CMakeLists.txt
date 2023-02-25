@@ -39,7 +39,7 @@ if(MSVC)
 	)
 
 else()
-	set(CMAKE_CXX_FLAGS "-Wall -std=c++11 -m32 -g")
+	set(CMAKE_CXX_FLAGS "-Wall -std=c++11 -m32 -g -fvisibility=hidden")
 	set(CMAKE_CXX_FLAGS_DEBUG "-O0")
 	set(CMAKE_CXX_FLAGS_RELEASE "-Os -w -Wfatal-errors")
 	target_compile_definitions(${PROJECT_NAME} PUBLIC -Dlinux)
