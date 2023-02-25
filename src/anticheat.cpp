@@ -80,6 +80,7 @@ cvar_t* g_enabled;
 cvar_t* g_log_commands;
 cvar_t* g_min_throttle_ms_log;
 cvar_t* g_cheat_client_check;
+cvar_t* g_block_game_bans;
 
 #define SPEEDHACK_WHITELIST_FILE "anticheat_speedhack_whitelist.txt"
 #define COMMAND_FILTER_FILE "anticheat_command_filter.txt"
@@ -88,6 +89,8 @@ set<string> g_cmd_log_filter;
 set<string> g_speedhack_whitelist; // list of players who have utterly shit connections, who you trust are not speedhackers
 
 map<string, string> g_player_models;
+
+bool g_block_next_kick_command = false;
 
 void ClientUserInfoChanged(edict_t* pEntity, char* infobuffer) {
 	vector<string> parts = splitString(infobuffer, "\\");
@@ -132,6 +135,49 @@ void ClientUserInfoChanged(edict_t* pEntity, char* infobuffer) {
 	RETURN_META(MRES_IGNORED);
 }
 
+void LogServerCommand(char* cmd) {
+	if (g_log_commands->value > 0 && cmd) {
+		string str(cmd);
+		if (str.size() > 0 && str[str.size() - 1] != '\n') {
+			str += "\n";
+		}
+		print("[Cmd][Server] %s", str.c_str());
+		log("[Cmd][Server] %s", str.c_str());
+	}
+}
+
+void HandleServerCommand(char* cmd) {
+	LogServerCommand(cmd);
+
+	// Commands that are automatically executed when a game-banned player joins the server:
+	// banid 1440.0 STEAM_0:0:XXXXXXXX
+	// kick "#1234"
+
+	if (g_block_game_bans->value > 0) {
+		string str(cmd);
+
+		if (str.find("banid 1440.0 STEAM_0:") == 0) {
+			string msg = "[AntiCheat] Blocked game-ban command '" + str.substr(0,str.size()-1) + "'. If this was actually an admin/plugin command, then choose a duration other than 1440.0\n";
+			g_block_next_kick_command = true;
+			print(msg.c_str());
+			log(msg.c_str());
+			RETURN_META(MRES_SUPERCEDE);
+		}
+		else if (g_block_next_kick_command && str.find("kick \"#") == 0) {
+			//string msg = string("[AntiCheat] Kick command blocked due to previous game ban command.");
+			//println(msg.c_str());
+			//logln(msg.c_str());
+			g_block_next_kick_command = false;
+			RETURN_META(MRES_SUPERCEDE);
+		}
+		else {
+			g_block_next_kick_command = false;
+		}
+	}
+
+	RETURN_META(MRES_IGNORED);
+}
+
 void PluginInit() {
 	// Total milliseconds of command packets that clients can send instantly after a lag spike.
 	// This is also the max time a speedhacker can speed up or slow down movements before
@@ -156,6 +202,9 @@ void PluginInit() {
 	// enables check for special cvars defined in cheat clients
 	g_cheat_client_check = RegisterCVar("anticheat.cheatclientcheck", "1", 1, 0);
 
+	// allow players with game bans to play on the server
+	g_block_game_bans = RegisterCVar("anticheat.blockgamebans", "0", 0, 0);
+
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
 	g_dll_hooks.pfnClientPutInServer = ClientJoin;
@@ -167,6 +216,7 @@ void PluginInit() {
 	g_dll_hooks_post.pfnPM_Move = PM_Move_post;
 	g_dll_hooks.pfnClientCommand = ClientCommand;
 	g_dll_hooks.pfnClientUserInfoChanged = ClientUserInfoChanged;
+	g_engine_hooks.pfnServerCommand = HandleServerCommand;
 
 	loadSpeedhackWhitelist();
 	loadLogFilter();
@@ -468,6 +518,18 @@ void kill_jumpbug_cheaters_phase3(edict_t* plr, PlayerDat& dat) {
 
 		// you take no fall damage when landing into an updward slope at high speed. Instead you slide up it.
 		bool launchingOffRamp = tr.vecPlaneNormal.z != 1 && tr.flFraction < 0.01f;
+
+		// checking last position because player may no longer be over a slope after move code runs
+		// but this doesn't work because the fraction is always like 0.5 or higher, so this plugin
+		// should be saving replays to help troubleshoot the false positives that rarely happen.
+		// Only checking last position makes it too easy to get jumpbug killed on slopes.
+		/*
+		if (!launchingOffRamp) {
+			g_engfuncs.pfnTraceHull(dat.lastPosition, traceEnd, dont_ignore_monsters, hullType, plr, &tr);
+			launchingOffRamp = tr.vecPlaneNormal.z != 1 && tr.flFraction < 0.01f;
+		}
+		*/
+
 
 		// touching or slightly above ground?
 		if (tr.flFraction < 1.0f && !launchingOffRamp) {
