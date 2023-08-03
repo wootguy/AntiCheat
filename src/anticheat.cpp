@@ -111,7 +111,7 @@ void ClientUserInfoChanged(edict_t* pEntity, char* infobuffer) {
 	string bottomcolor;
 	string modelname;
 
-	for (int i = 0; i < parts.size()-1; i += 2) {
+	for (int i = 1; i < parts.size()-1; i += 2) {
 		string key = parts[i];
 		string value = parts[i + 1];
 
@@ -135,7 +135,7 @@ void ClientUserInfoChanged(edict_t* pEntity, char* infobuffer) {
 	g_player_models[steamid] = modelinfo;
 
 	char* msg = UTIL_VarArgs("[ModelInfo] %s\\%s\\%s", steamid.c_str(), modelinfo.c_str(), STRING(pEntity->v.netname));
-	//println("%s", msg); 
+	println("%s", msg); 
 	logln("%s", msg); // %s to prevent injection println interpreting %d or something in model name
 
 	RETURN_META(MRES_IGNORED);
