@@ -186,6 +186,7 @@ struct playermove_s
 };
 
 void MapInit(edict_t* pEdictList, int edictCount, int clientMax);
+void MapInit_post(edict_t* pEdictList, int edictCount, int clientMax);
 void StartFrame();
 void ClientJoin(edict_t* pEntity);
 void PlayerPreThink(edict_t* pEntity);
