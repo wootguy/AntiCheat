@@ -2,9 +2,10 @@
 #include <string>
 #include "enginecallback.h"
 #include "eiface.h"
-#include "utils.h"
 #include <algorithm>
 #include <set>
+#include "mmlib.h"
+
 
 // TODO: cameras stop PM_Move calls, false slowhack
 
@@ -18,6 +19,7 @@ using namespace std;
 #define MIN_SPEEDHACK_DURATION 1.0f // how long to wait until a speed is normalized to consider a hack finished
 #define MAX_SPEEDHACK_DURATION 10.0f // don't wait until speed normalizes to log, if hack lasts longer than this
 #define JUMPBUG_SPEED 580
+#define MIN_SNARK_SWAP_TIME 0.05f // minimum time allowed between snark swaps before penalty
 
 // Description of plugin
 plugin_info_t Plugin_info = {
@@ -68,6 +70,9 @@ struct PlayerDat {
 	float lastDebugFps;
 
 	bool isTrustedPlayer; // don't do speedhack corrections for this player if true
+
+	float lastSnarkSwap = 0;
+	int snarkSwapCounter = 0; // decreases every frame
 };
 
 PlayerDat playerDat[32];
@@ -81,6 +86,7 @@ cvar_t* g_log_commands;
 cvar_t* g_min_throttle_ms_log;
 cvar_t* g_cheat_client_check;
 cvar_t* g_block_game_bans;
+cvar_t* g_block_snark_lag;
 
 #define SPEEDHACK_WHITELIST_FILE "anticheat_speedhack_whitelist.txt"
 #define COMMAND_FILTER_FILE "anticheat_command_filter.txt"
@@ -146,6 +152,12 @@ void LogServerCommand(char* cmd) {
 	}
 }
 
+// overflow messages:
+// SZ_GetSpace: overflow on netchan->message
+// Dropped w00tguy from server
+// Reason: Reliable channel overflowed
+// (can't hook these with AlertMessage)
+
 void HandleServerCommand(char* cmd) {
 	LogServerCommand(cmd);
 
@@ -204,11 +216,15 @@ void PluginInit() {
 
 	// allow players with game bans to play on the server
 	g_block_game_bans = RegisterCVar("anticheat.blockgamebans", "0", 0, 0);
+	
+	// block rapid snark switching which causes lag and ear rape
+	g_block_snark_lag = RegisterCVar("anticheat.blocksnarklag", "1", 1, 0);
 
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
 	g_dll_hooks.pfnClientPutInServer = ClientJoin;
 	g_dll_hooks.pfnServerActivate = MapInit;
+	g_dll_hooks_post.pfnServerActivate = MapInit_post;
 	g_dll_hooks.pfnPlayerPreThink = PlayerPreThink;
 	g_dll_hooks.pfnPlayerPostThink = PlayerPostThink;
 	g_dll_hooks_post.pfnPlayerPostThink = PlayerPostThink_post;
@@ -295,6 +311,12 @@ void MapInit(edict_t* pEdictList, int edictCount, int clientMax) {
 
 	loadSpeedhackWhitelist();
 	g_player_models.clear();
+
+	RETURN_META(MRES_IGNORED);
+}
+
+void MapInit_post(edict_t* pEdictList, int edictCount, int clientMax) {
+	loadSoundCacheFile();
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -440,9 +462,66 @@ void logClientCommand(edict_t* plr) {
 		}
 	}
 
-	const char* steamid = getPlayerUniqueId(plr);
+	string steamid = getPlayerUniqueId(plr);
 	//println("[Cmd][%s][%s] %s", steamid, STRING(plr->v.netname), command.c_str());
-	logln("[Cmd][%s][%s] %s", steamid, STRING(plr->v.netname), command.c_str());
+	logln("[Cmd][%s][%s] %s", steamid.c_str(), STRING(plr->v.netname), command.c_str());
+}
+
+int g_snark_ammo_idx = -1;
+
+void block_snark_lag(edict_t* ed_plr) {
+	string cmd = toLowerCase(CMD_ARGV(0));
+
+	PlayerDat& dat = playerDat[ENTINDEX(ed_plr) - 1];
+
+	if (cmd == "weapon_snark") {
+		dat.snarkSwapCounter++;
+		dat.lastSnarkSwap = gpGlobals->time;
+	}
+	else if (cmd == "lastinv") {
+		CBasePlayer* plr = (CBasePlayer*)GET_PRIVATE(ed_plr);
+
+		if (!plr) {
+			return;
+		}
+
+		// swapping to another weapon from the snark
+		CBasePlayerWeapon* wep = (CBasePlayerWeapon*)plr->m_hActiveItem.GetEntity();
+		if (!wep || strcmp(STRING(wep->pev->classname), "weapon_snark")) {
+			return;
+		}
+		
+		// so we know which ammo idx to decrement later
+		g_snark_ammo_idx = wep->m_iPrimaryAmmoType;
+
+		dat.lastSnarkSwap = gpGlobals->time;
+		dat.snarkSwapCounter++;
+	}
+
+	if (dat.snarkSwapCounter > 3) {
+		dat.snarkSwapCounter = 0;
+
+		CBasePlayer* plr = (CBasePlayer*)GET_PRIVATE(ed_plr);
+
+		if (!plr) {
+			return;
+		}
+
+		if (g_snark_ammo_idx == -1) {
+			println("snark ammo index unknown");
+			return;
+		}
+
+		if (plr->m_rgAmmo[g_snark_ammo_idx] > 0) {
+			plr->m_rgAmmo[g_snark_ammo_idx] = Max(0, plr->m_rgAmmo[g_snark_ammo_idx] - 5);
+
+			if (plr->pev->health > 0) {
+				PlaySound(ed_plr, CHAN_VOICE, "squeek/sqk_blast1.wav", 1.0f, 0.5f, 0, PITCH_NORM);
+				te_bloodsprite(ed_plr->v.origin, "sprites/bloodspray.spr", "sprites/blood.spr", 54, 15, MSG_BROADCAST);
+				TakeDamage(ed_plr, ed_plr, ed_plr, 5*5, DMG_BLAST); // 5 = default skill damage for snark pop
+			}
+		}
+	}
 }
 
 void ClientCommand(edict_t* pEntity) {
@@ -450,6 +529,10 @@ void ClientCommand(edict_t* pEntity) {
 
 	if (g_log_commands->value > 0) {
 		logClientCommand(pEntity);
+	}
+
+	if (g_block_snark_lag->value > 0) {
+		block_snark_lag(pEntity);
 	}
 
 	RETURN_META(ret);
@@ -469,14 +552,14 @@ void log_speedhack(PlayerDat& dat, uint64_t now, int player_index) {
 
 		if ((speedhackHasEnded || speedhackIsVeryLong) && canLogNow) {
 			edict_t* plr = INDEXENT(player_index + 1);
-			const char* steamid = getPlayerUniqueId(plr);
+			string steamid = getPlayerUniqueId(plr);
 			float duration = TimeDifference(dat.detectStartTime, dat.lastCorrection);
 			int throttleMs = dat.fastDetections > 0 ? dat.fastDetections : -dat.slowDetections;
 
 			if (!dat.isTrustedPlayer && abs(throttleMs) > g_min_throttle_ms_log->value) {
 				// not calling it a speedhack because lag spikes trigger this too
 				logln("[AntiCheat] Throttled %s (%s) by %dms over %.2fs",
-					STRING(plr->v.netname), steamid, throttleMs, duration);
+					STRING(plr->v.netname), steamid.c_str(), throttleMs, duration);
 			}
 
 			dat.fastDetections = 0;
@@ -533,11 +616,11 @@ void kill_jumpbug_cheaters_phase3(edict_t* plr, PlayerDat& dat) {
 
 		// touching or slightly above ground?
 		if (tr.flFraction < 1.0f && !launchingOffRamp) {
-			const char* steamid = getPlayerUniqueId(plr);
+			string steamid = getPlayerUniqueId(plr);
 			Vector origin = plr->v.origin;
 
 			logln("[AntiCheat] Jumpbug on %s (%s): map=%s, origin=%d %d %d",
-				STRING(plr->v.netname), steamid, STRING(gpGlobals->mapname), (int)origin.x, (int)origin.y, (int)origin.z);
+				STRING(plr->v.netname), steamid.c_str(), STRING(gpGlobals->mapname), (int)origin.x, (int)origin.y, (int)origin.z);
 
 			if (g_jumpbugCheck->value != 0) {
 				ClientPrintAll(HUD_PRINTNOTIFY, UTIL_VarArgs("[AntiCheat] %s was killed for using the jumpbug cheat.\n", STRING(plr->v.netname)));
@@ -557,7 +640,14 @@ void PlayerPreThink(edict_t* plr) {
 }
 
 void PlayerPostThink(edict_t* plr) {
-	if (g_enabled->value > 0 && g_maxErrorSeconds->value > 0 && playerDat[ENTINDEX(plr) - 1].speedhackState == SPEEDHACK_FAST) {
+	PlayerDat& dat = playerDat[ENTINDEX(plr) - 1];
+
+	if (dat.snarkSwapCounter > 0 && gpGlobals->time - dat.lastSnarkSwap > MIN_SNARK_SWAP_TIME) {
+		dat.snarkSwapCounter--;
+		dat.lastSnarkSwap = gpGlobals->time;
+	}
+
+	if (g_enabled->value > 0 && g_maxErrorSeconds->value > 0 && dat.speedhackState == SPEEDHACK_FAST) {
 		// prevent weapon speedhack
 		RETURN_META(MRES_SUPERCEDE);
 	}
@@ -704,18 +794,6 @@ void PM_Move_post(struct playermove_s* ppmove, int server) {
 
 	kill_jumpbug_cheaters_phase2(ppmove, plr, dat);
 	RETURN_META(MRES_IGNORED);
-}
-
-// send a message to the angelscript chat bridge plugin
-void RelaySay(string message) {
-	std::remove(message.begin(), message.end(), '\n'); // stip any newlines, ChatBridge.as takes care
-	replaceString(message, "\"", "'"); // replace quotes so cvar is set correctly
-
-	logln(string("[RelaySay ") + Plugin_info.name + "]: " + message + "\n");
-
-	g_engfuncs.pfnCVarSetString("relay_say_msg", message.c_str());
-	g_engfuncs.pfnServerCommand(UTIL_VarArgs("as_command .relay_say %s\n", Plugin_info.name));
-	g_engfuncs.pfnServerExecute();
 }
 
 void CvarValue2(const edict_t* pEnt, int requestID, const char* cvarName, const char* value) {
