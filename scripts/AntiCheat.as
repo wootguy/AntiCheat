@@ -25,19 +25,21 @@ HookReturnCode PlayerTakeDamage(DamageInfo@ info) {
 		return HOOK_CONTINUE;
 	}
 	
-	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(cast<CBasePlayer@>(inflictor).m_hActiveItem.GetEntity());
+	CBasePlayer@ plr = cast<CBasePlayer@>(inflictor);
+	CBasePlayerWeapon@ wep = cast<CBasePlayerWeapon@>(plr.m_hActiveItem.GetEntity());
 	if (wep is null || string(wep.pev.classname) != "weapon_crowbar") {
 		return HOOK_CONTINUE;
 	}
 	
-	int eidx = inflictor.entindex();
+	int eidx = plr.entindex();
 	if (g_EngineFuncs.Time() - lastCrowbarPlayer[eidx] < 0.02f) {
 		// TODO: maybe wait for 2-3 fast hits so lag spikes trigger this less often
 		g_EntityFuncs.Remove(wep);
+		g_Log.PrintF("[AntiCheat_as] " + plr.pev.netname + " (" +  g_EngineFuncs.GetPlayerAuthId( plr.edict() ) + ") crowbar throttled\n");
 		
 		g_EntityFuncs.CreateEntity("weapon_crowbar", {
-			{"origin", inflictor.pev.origin.ToString()},
-			{"angles", inflictor.pev.angles.ToString()},
+			{"origin", plr.pev.origin.ToString()},
+			{"angles", plr.pev.angles.ToString()},
 			{"spawnflags", "1024"}
 		}, true);
 	}
