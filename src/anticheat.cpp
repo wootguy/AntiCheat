@@ -410,6 +410,7 @@ bool doCommand(edict_t* plr) {
 	bool isAdmin = AdminLevel(plr) >= ADMIN_YES;
 	PlayerDat& dat = playerDat[ENTINDEX(plr) - 1];
 	CommandArgs args = CommandArgs();
+	args.loadArgs();
 	string lowerArg = toLowerCase(args.ArgV(0));
 
 	if (args.ArgC() > 0 && lowerArg == ".ac") {
