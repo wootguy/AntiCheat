@@ -20,6 +20,8 @@ using namespace std;
 #define MAX_SPEEDHACK_DURATION 10.0f // don't wait until speed normalizes to log, if hack lasts longer than this
 #define JUMPBUG_SPEED 580
 #define MIN_SNARK_SWAP_TIME 0.05f // minimum time allowed between snark swaps before penalty
+#define MIN_AUTOSTRAFE_TIME 0.06f // swapping strafe directions faster than this will stop strafe commands
+#define MIN_AUTOSTRAFE_DETECTIONS 4 // number of times to swap too quickly before stopping strafe commands
 
 // Description of plugin
 plugin_info_t Plugin_info = {
@@ -62,6 +64,12 @@ struct PlayerDat {
 	float lastHealth;
 	float lastVelocityZ; // for jumpbug detection
 
+	// autostrafe state
+	uint64_t lastStrafeFlip; // last time strafe direction inverted
+	int numAutoStrafes; // number of times the strafe direction inverted too quickly
+	float lastSideDir; // last side movement command
+	uint64_t lastAutoStrafeLog; // last time a message was logged for auto strafe blocking
+
 	// debug command info
 	int debugTarget; // >0 if debugging player network
 	uint32_t lastDebugPacketCount;
@@ -87,6 +95,7 @@ cvar_t* g_min_throttle_ms_log;
 cvar_t* g_cheat_client_check;
 cvar_t* g_block_game_bans;
 cvar_t* g_block_snark_lag;
+cvar_t* g_block_autostrafe;
 
 #define SPEEDHACK_WHITELIST_FILE "anticheat_speedhack_whitelist.txt"
 #define COMMAND_FILTER_FILE "anticheat_command_filter.txt"
@@ -97,6 +106,8 @@ set<string> g_speedhack_whitelist; // list of players who have utterly shit conn
 map<string, string> g_player_models;
 
 bool g_block_next_kick_command = false;
+
+int cheatChecked[33] = { 0 };
 
 void ClientUserInfoChanged(edict_t* pEntity, char* infobuffer) {
 	vector<string> parts = splitString(infobuffer, "\\");
@@ -220,6 +231,9 @@ void PluginInit() {
 	// block rapid snark switching which causes lag and ear rape
 	g_block_snark_lag = RegisterCVar("anticheat.blocksnarklag", "1", 1, 0);
 
+	// block rapid strafe toggling for unskilled bunny hopping and fast running
+	g_block_autostrafe = RegisterCVar("anticheat.autostrafe", "1", 1, 0);
+
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
 	g_dll_hooks.pfnClientPutInServer = ClientJoin;
@@ -311,6 +325,8 @@ void MapInit(edict_t* pEdictList, int edictCount, int clientMax) {
 
 	loadSpeedhackWhitelist();
 	g_player_models.clear();
+
+	memset(cheatChecked, 0, sizeof(int));
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -672,6 +688,34 @@ void PM_Move(playermove_s* ppmove, int server) {
 	edict_t* plr = INDEXENT(ppmove->player_index + 1);
 	PlayerDat& dat = playerDat[ppmove->player_index];
 	uint64_t now = getEpochMillis();
+
+	if (g_block_autostrafe->value > 0) {
+		float timeSinceLastStrafeFlip = TimeDifference(dat.lastStrafeFlip, now);
+		bool strafeFlip = (cmd->sidemove > 0 && dat.lastSideDir < 0) || (cmd->sidemove < 0 && dat.lastSideDir > 0);
+		if (abs(cmd->forwardmove) > 0 && strafeFlip) {
+			if (timeSinceLastStrafeFlip < MIN_AUTOSTRAFE_TIME) {
+				dat.numAutoStrafes = Min(dat.numAutoStrafes + 1, MIN_AUTOSTRAFE_DETECTIONS);
+			}
+			dat.lastStrafeFlip = now;
+		}
+
+		dat.lastSideDir = cmd->sidemove;
+
+		if (dat.numAutoStrafes > 0 && timeSinceLastStrafeFlip > MIN_AUTOSTRAFE_TIME * 2) {
+			dat.numAutoStrafes -= 1;
+		}
+		if (dat.numAutoStrafes >= MIN_AUTOSTRAFE_DETECTIONS) {
+			cmd->sidemove = 0;
+
+			if (g_block_autostrafe->value > 1 && TimeDifference(dat.lastAutoStrafeLog, now) > 10.0f) {
+				string steamid = getPlayerUniqueId(plr);
+				logln("[AntiCheat] blocked sc_autostrafe on %s (%s)",
+					STRING(plr->v.netname), steamid.c_str());
+
+				dat.lastAutoStrafeLog = now;
+			}
+		}
+	}
 
 	if (plr->v.flags & FL_FROZEN) {
 		// frozen players don't send normal command packets
