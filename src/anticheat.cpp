@@ -94,7 +94,6 @@ cvar_t* g_log_commands;
 cvar_t* g_min_throttle_ms_log;
 cvar_t* g_cheat_client_check;
 cvar_t* g_block_game_bans;
-cvar_t* g_block_snark_lag;
 cvar_t* g_block_autostrafe;
 
 #define SPEEDHACK_WHITELIST_FILE "anticheat_speedhack_whitelist.txt"
@@ -103,7 +102,8 @@ cvar_t* g_block_autostrafe;
 set<string> g_cmd_log_filter;
 set<string> g_speedhack_whitelist; // list of players who have utterly shit connections, who you trust are not speedhackers
 
-map<string, string> g_player_models;
+map<string, set<string>> g_player_models;
+
 
 bool g_block_next_kick_command = false;
 
@@ -139,11 +139,11 @@ void ClientUserInfoChanged(edict_t* pEntity, char* infobuffer) {
 
 	string modelinfo = modelname + "\\" + topcolor + "\\" + bottomcolor;
 
-	if (g_player_models.find(steamid) != g_player_models.end() && g_player_models[steamid] == modelinfo) {
+	if (g_player_models.find(steamid) != g_player_models.end() && g_player_models[steamid].count(modelinfo)) {
 		RETURN_META(MRES_IGNORED); // model info unchanged
 	}
 
-	g_player_models[steamid] = modelinfo;
+	g_player_models[steamid].insert(modelinfo);
 
 	char* msg = UTIL_VarArgs("[ModelInfo] %s\\%s\\%s", steamid.c_str(), modelinfo.c_str(), STRING(pEntity->v.netname));
 	println("%s", msg); 
@@ -227,9 +227,6 @@ void PluginInit() {
 
 	// allow players with game bans to play on the server
 	g_block_game_bans = RegisterCVar("anticheat.blockgamebans", "0", 0, 0);
-	
-	// block rapid snark switching which causes lag and ear rape
-	g_block_snark_lag = RegisterCVar("anticheat.blocksnarklag", "1", 1, 0);
 
 	// block rapid strafe toggling for unskilled bunny hopping and fast running
 	g_block_autostrafe = RegisterCVar("anticheat.autostrafe", "1", 1, 0);
@@ -238,7 +235,6 @@ void PluginInit() {
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
 	g_dll_hooks.pfnClientPutInServer = ClientJoin;
 	g_dll_hooks.pfnServerActivate = MapInit;
-	g_dll_hooks_post.pfnServerActivate = MapInit_post;
 	g_dll_hooks.pfnPlayerPreThink = PlayerPreThink;
 	g_dll_hooks.pfnPlayerPostThink = PlayerPostThink;
 	g_dll_hooks_post.pfnPlayerPostThink = PlayerPostThink_post;
@@ -327,12 +323,6 @@ void MapInit(edict_t* pEdictList, int edictCount, int clientMax) {
 	g_player_models.clear();
 
 	memset(cheatChecked, 0, sizeof(int));
-
-	RETURN_META(MRES_IGNORED);
-}
-
-void MapInit_post(edict_t* pEdictList, int edictCount, int clientMax) {
-	loadSoundCacheFile();
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -484,72 +474,11 @@ void logClientCommand(edict_t* plr) {
 	logln("[Cmd][%s][%s] %s", steamid.c_str(), STRING(plr->v.netname), command.c_str());
 }
 
-int g_snark_ammo_idx = -1;
-
-void block_snark_lag(edict_t* ed_plr) {
-	string cmd = toLowerCase(CMD_ARGV(0));
-
-	PlayerDat& dat = playerDat[ENTINDEX(ed_plr) - 1];
-
-	if (cmd == "weapon_snark") {
-		dat.snarkSwapCounter++;
-		dat.lastSnarkSwap = gpGlobals->time;
-	}
-	else if (cmd == "lastinv") {
-		CBasePlayer* plr = (CBasePlayer*)GET_PRIVATE(ed_plr);
-
-		if (!plr) {
-			return;
-		}
-
-		// swapping to another weapon from the snark
-		CBasePlayerWeapon* wep = (CBasePlayerWeapon*)plr->m_hActiveItem.GetEntity();
-		if (!wep || strcmp(STRING(wep->pev->classname), "weapon_snark")) {
-			return;
-		}
-		
-		// so we know which ammo idx to decrement later
-		g_snark_ammo_idx = wep->m_iPrimaryAmmoType;
-
-		dat.lastSnarkSwap = gpGlobals->time;
-		dat.snarkSwapCounter++;
-	}
-
-	if (dat.snarkSwapCounter > 3) {
-		dat.snarkSwapCounter = 0;
-
-		CBasePlayer* plr = (CBasePlayer*)GET_PRIVATE(ed_plr);
-
-		if (!plr) {
-			return;
-		}
-
-		if (g_snark_ammo_idx == -1) {
-			println("snark ammo index unknown");
-			return;
-		}
-
-		if (plr->m_rgAmmo[g_snark_ammo_idx] > 0) {
-			plr->m_rgAmmo[g_snark_ammo_idx] = Max(0, plr->m_rgAmmo[g_snark_ammo_idx] - 5);
-
-			if (plr->pev->health > 0) {
-				PlaySound(ed_plr, CHAN_VOICE, "squeek/sqk_blast1.wav", 1.0f, 0.5f, 0, PITCH_NORM);
-				te_bloodsprite(ed_plr->v.origin, "sprites/bloodspray.spr", "sprites/blood.spr", 54, 15, MSG_BROADCAST);
-				TakeDamage(ed_plr, ed_plr, ed_plr, 5*5, DMG_BLAST); // 5 = default skill damage for snark pop
-			}
-		}
-	}
-}
-
 void ClientCommand(edict_t* pEntity) {
 	META_RES ret = doCommand(pEntity) ? MRES_SUPERCEDE : MRES_IGNORED;
 
 	if (g_log_commands->value > 0) {
 		logClientCommand(pEntity);
-	}
-
-	if (g_block_snark_lag->value > 0) {
-		block_snark_lag(pEntity);
 	}
 
 	RETURN_META(ret);
