@@ -1,0 +1,16 @@
+// This file lists commands which should not be logged when anticheat.logcmd = 1
+// Weapon switching commands are filtered in code by wildcard ("weapon_*")
+
+gibme
+kill
+drop
+dropammo
+dropsecammo
+medic
+grenade
+npc_findcover
+npc_moveto
+lastinv
+vmodenable
+vban
+as_menuselect
