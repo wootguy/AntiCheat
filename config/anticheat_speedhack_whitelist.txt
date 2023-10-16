@@ -1,0 +1,4 @@
+// This file lists Steam IDs to disable speedhack checks for.
+// Trusted players with terrible connections should be added to this file.
+
+STEAM_0:1:012345678  // A whitelisted player's Steam ID.
