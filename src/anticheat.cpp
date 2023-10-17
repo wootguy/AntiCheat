@@ -27,7 +27,7 @@ using namespace std;
 plugin_info_t Plugin_info = {
 	META_INTERFACE_VERSION,	// ifvers
 	"AntiCheat",	// name
-	"1.0",	// version
+	"2",	// version
 	__DATE__,	// date
 	"w00tguy",	// author
 	"https://github.com/wootguy/",	// url
@@ -95,6 +95,7 @@ cvar_t* g_min_throttle_ms_log;
 cvar_t* g_cheat_client_check;
 cvar_t* g_block_game_bans;
 cvar_t* g_block_autostrafe;
+cvar_t* g_log_modelinfo;
 
 #define SPEEDHACK_WHITELIST_FILE "anticheat_speedhack_whitelist.txt"
 #define COMMAND_FILTER_FILE "anticheat_command_filter.txt"
@@ -158,8 +159,8 @@ void LogServerCommand(char* cmd) {
 		if (str.size() > 0 && str[str.size() - 1] != '\n') {
 			str += "\n";
 		}
-		print("[Cmd][Server] %s", str.c_str());
-		log("[Cmd][Server] %s", str.c_str());
+		printp("[Cmd][Server] %s", str.c_str());
+		logp("[Cmd][Server] %s", str.c_str());
 	}
 }
 
@@ -182,8 +183,8 @@ void HandleServerCommand(char* cmd) {
 		if (str.find("banid 1440.0 STEAM_0:") == 0) {
 			string msg = "[AntiCheat] Blocked game-ban command '" + str.substr(0,str.size()-1) + "'. If this was actually an admin/plugin command, then choose a duration other than 1440.0\n";
 			g_block_next_kick_command = true;
-			print(msg.c_str());
-			log(msg.c_str());
+			printp(msg.c_str());
+			logp(msg.c_str());
 			RETURN_META(MRES_SUPERCEDE);
 		}
 		else if (g_block_next_kick_command && str.find("kick \"#") == 0) {
@@ -230,6 +231,9 @@ void PluginInit() {
 
 	// block rapid strafe toggling for unskilled bunny hopping and fast running
 	g_block_autostrafe = RegisterCVar("anticheat.autostrafe", "1", 1, 0);
+
+	// log model names for players (for catching models that cause client crashes)
+	g_log_modelinfo = RegisterCVar("anticheat.logmodelinfo", "0", 0, 0);
 
 	g_dll_hooks.pfnStartFrame = StartFrame;
 	g_newdll_hooks.pfnCvarValue2 = CvarValue2;
