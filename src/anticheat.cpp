@@ -800,7 +800,7 @@ void StartFrame() {
 	check_debuggers();
 	
 	if (g_cheat_client_check->value <= 0) {
-		return;
+		RETURN_META(MRES_IGNORED);
 	}
 
 	uint64_t now = getEpochMillis();
